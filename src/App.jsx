@@ -29,7 +29,6 @@ const SCORE_COLORS = {
   low: "bg-red-100 text-red-800 border-red-200",
 };
 
-// Hits your backend proxy — API key never touches the browser
 const callClaude = async (messages) => {
   const res = await fetch("/api/claude", {
     method: "POST",
@@ -59,6 +58,38 @@ const parseJSON = (text) => {
     }
     throw new Error("Could not parse JSON");
   }
+};
+
+const resolveManufacturerUrl = (mfr, part) => {
+  if (part.manufacturerUrl) return part.manufacturerUrl;
+  const pn = part.partNumber;
+  const m = mfr.toLowerCase().replace(/\s+/g, "");
+  const known = {
+    belden: `https://www.belden.com/products/${pn}`,
+    amphenol: `https://www.amphenol.com/product/${pn}`,
+    molex: `https://www.molex.com/en-us/products/part-detail/${pn}`,
+    phoenix: `https://www.phoenixcontact.com/en-us/products/${pn}`,
+    wago: `https://www.wago.com/global/search?text=${pn}`,
+    siemens: `https://mall.industry.siemens.com/mall/en/us/Catalog/product/?mlfb=${encodeURIComponent(pn)}`,
+    parker: `https://www.parker.com/portal/site/PARKER/menuitem.search/?q=${pn}`,
+    honeywell: `https://sps.honeywell.com/us/en/search#q=${pn}`,
+    te: `https://www.te.com/en/search.html#q=${pn}`,
+    teconnectivity: `https://www.te.com/en/search.html#q=${pn}`,
+    omron: `https://www.ia.omron.com/search/keyword/?q=${pn}`,
+    schneider: `https://www.se.com/us/en/product/search/#q=${pn}`,
+    eaton: `https://www.eaton.com/us/en-us/catalog/search.html?q=${pn}`,
+    panduit: `https://www.panduit.com/en/search.html#q=${pn}`,
+    corning: `https://www.corning.com/optical-communications/worldwide/en/home/products/search.html#q=${pn}`,
+    3m: `https://www.3m.com/3M/en_US/company-us/search/#q=${pn}`,
+    leviton: `https://www.leviton.com/en/search#q=${pn}`,
+    hubbell: `https://www.hubbell.com/hubbell/en/search?q=${pn}`,
+    commscope: `https://www.commscope.com/product-type/search/?q=${pn}`,
+    fluke: `https://www.fluke.com/en-us/search#q=${pn}`,
+  };
+  for (const [key, url] of Object.entries(known)) {
+    if (m.includes(key)) return url;
+  }
+  return `https://www.${m}.com/search?q=${encodeURIComponent(pn)}`;
 };
 
 export default function App() {
@@ -151,7 +182,7 @@ Respond with ONLY a raw JSON array, no markdown, starting with [ ending with ]:
     setSelectedPart(part);
     const [d1, d2, d3] = discoveredDistributors;
     setUrls({
-      manufacturer: part.manufacturerUrl || "",
+      manufacturer: resolveManufacturerUrl(manufacturer, part),
       dist1: d1 ? resolveUrl(d1, part) : "",
       dist2: d2 ? resolveUrl(d2, part) : "",
       dist3: d3 ? resolveUrl(d3, part) : "",

@@ -92,37 +92,6 @@ const resolveManufacturerUrl = (mfr, part) => {
   return `https://www.${m}.com/search?q=${encodeURIComponent(pn)}`;
 };
 
-// Ask Claude to return real PDP URLs for all sources at once
-const resolvePDPUrls = async (sources, partNumber, mfr) => {
-  const prompt = `You are a B2B product data expert with deep knowledge of distributor and manufacturer websites.
-
-For the part number "${partNumber}" from manufacturer "${mfr}", provide the best direct Product Detail Page (PDP) URL for each of the following sites. A PDP URL goes directly to a single product listing — NOT a search results page, NOT a category page.
-
-Use your knowledge of each site's URL structure. If you are confident in the PDP URL pattern, construct it. If not confident, return the search URL provided.
-
-Sites:
-${sources.map((s, i) => `${i + 1}. ${s.name} — current URL: ${s.url}`).join("\n")}
-
-For each site return:
-- "name": site name exactly as provided
-- "url": best PDP URL you can construct (or original if not confident)  
-- "type": "pdp" if you're confident this is a direct product page, "search" if it's a search/category page
-- "confidence": "high" | "medium" | "low"
-
-Known PDP URL patterns:
-- Digi-Key: https://www.digikey.com/en/products/detail/[mfr-slug]/[part-number]/[numeric-id]
-- Mouser: https://www.mouser.com/ProductDetail/[mfr]/[part-number]
-- Arrow: https://www.arrow.com/en/products/[part-number]/[mfr-slug]
-- Newark: https://www.newark.com/[mfr-slug]/[part-number]/[product-slug]/dp/[id]
-- RS Components: https://www.rs-online.com/web/p/[product-slug]/[id]
-
-Respond ONLY with a raw JSON array:
-[{"name":"","url":"","type":"pdp|search","confidence":"high|medium|low"}]`;
-
-  const raw = await callClaude([{ role: "user", content: prompt }]);
-  return parseJSON(raw);
-};
-
 export default function App() {
   const [step, setStep] = useState("discover");
   const [manufacturer, setManufacturer] = useState("");
@@ -131,13 +100,11 @@ export default function App() {
   const [discoveredDistributors, setDiscoveredDistributors] = useState([]);
   const [selectedPart, setSelectedPart] = useState(null);
   const [urls, setUrls] = useState({ manufacturer: "", dist1: "", dist2: "", dist3: "" });
-  const [urlMeta, setUrlMeta] = useState({ manufacturer: { type: "pdp", confidence: "high" }, dist1: { type: "pdp", confidence: "high" }, dist2: { type: "pdp", confidence: "high" }, dist3: { type: "pdp", confidence: "high" } });
   const [names, setNames] = useState({ manufacturer: "", dist1: "", dist2: "", dist3: "" });
   const [results, setResults] = useState(null);
   const [activeTab, setActiveTab] = useState("gaps");
   const [log, setLog] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [resolving, setResolving] = useState(false);
   const [error, setError] = useState("");
 
   const addLog = (msg) => setLog(l => [...l, msg]);
@@ -154,13 +121,13 @@ Identify the top 5 best-selling or most widely distributed parts from manufactur
 
 Criteria: high distributor catalog breadth, industry-standard, high volume, broad cross-references.
 
-For each part construct realistic direct product page URLs using known URL patterns:
-- Digi-Key: https://www.digikey.com/en/products/detail/[mfr-slug]/[part]/[id]
-- Mouser: https://www.mouser.com/ProductDetail/[mfr]/[part]
-- Arrow: https://www.arrow.com/en/products/[part]/[mfr]
-- Manufacturer: use their known domain + product path
+For each part, provide search URLs only — do not attempt to construct PDP URLs as these require database IDs you cannot know reliably.
 
-Leave URL as empty string if not confident. Do NOT fabricate URLs.
+Use these search URL patterns:
+- Digi-Key: https://www.digikey.com/en/products/filter?keywords=[partNumber]
+- Mouser: https://www.mouser.com/Search/Refine?Keyword=[partNumber]
+- Arrow: https://www.arrow.com/en/products/search?q=[partNumber]
+- Manufacturer: use their known domain + search path
 
 Respond with ONLY a raw JSON array, no markdown, starting with [ and ending with ]:
 [{"partNumber":"","name":"","confidence":"high|medium|low","sources":[],"manufacturerUrl":"","digikeyUrl":"","mouserUrl":"","arrowUrl":"","reason":""}]` }]);
@@ -172,16 +139,16 @@ Identify the top 3 distributors for manufacturer "${manufacturer}" in the catego
 
 Evaluate based on: authorized agreements, SKU breadth, inventory depth, channel priority, vertical fit.
 
-Known distributor URL patterns:
-- Digi-Key: https://www.digikey.com/en/products/filter?keywords=[mfr]
-- Mouser: https://www.mouser.com/c/?m=[mfr]
-- Arrow: https://www.arrow.com/en/manufacturers/[mfr-slug]
-- Newark: https://www.newark.com/search?st=[mfr]
-- RS Components: https://www.rs-online.com/web/c/?searchTerm=[mfr]
-- Grainger: https://www.grainger.com/search?searchQuery=[mfr]
-- MSC: https://www.mscdirect.com/browse/tn/?searchterm=[mfr]
-- Allied: https://www.alliedelec.com/search/?q=[mfr]
-- Galco: https://www.galco.com/buy/[mfr]
+Known distributor search URL patterns:
+- Digi-Key: https://www.digikey.com/en/products/filter?keywords=[partNumber]
+- Mouser: https://www.mouser.com/Search/Refine?Keyword=[partNumber]
+- Arrow: https://www.arrow.com/en/products/search?q=[partNumber]
+- Newark: https://www.newark.com/search?st=[partNumber]
+- RS Components: https://www.rs-online.com/web/c/?searchTerm=[partNumber]
+- Grainger: https://www.grainger.com/search?searchQuery=[partNumber]
+- MSC: https://www.mscdirect.com/browse/tn/?searchterm=[partNumber]
+- Allied: https://www.alliedelec.com/search/?q=[partNumber]
+- Galco: https://www.galco.com/buy/${manufacturer}/[partNumber]
 
 Respond with ONLY a raw JSON array, no markdown, starting with [ ending with ]:
 [{"name":"","confidence":"high","relationship":"authorized","verticalFit":"","searchUrl":"","domain":""}]` }]);
@@ -199,9 +166,9 @@ Respond with ONLY a raw JSON array, no markdown, starting with [ ending with ]:
   const resolveUrl = (dist, part) => {
     const domain = dist.domain?.toLowerCase() || "";
     const pn = encodeURIComponent(part.partNumber);
-    if (domain.includes("digikey")) return part.digikeyUrl || `https://www.digikey.com/en/products/filter?keywords=${pn}`;
-    if (domain.includes("mouser")) return part.mouserUrl || `https://www.mouser.com/Search/Refine?Keyword=${pn}`;
-    if (domain.includes("arrow")) return part.arrowUrl || `https://www.arrow.com/en/products/search?q=${pn}`;
+    if (domain.includes("digikey")) return `https://www.digikey.com/en/products/filter?keywords=${pn}`;
+    if (domain.includes("mouser")) return `https://www.mouser.com/Search/Refine?Keyword=${pn}`;
+    if (domain.includes("arrow")) return `https://www.arrow.com/en/products/search?q=${pn}`;
     if (domain.includes("newark")) return `https://www.newark.com/search?st=${pn}`;
     if (domain.includes("rs-online")) return `https://www.rs-online.com/web/c/?searchTerm=${pn}`;
     if (domain.includes("grainger")) return `https://www.grainger.com/search?searchQuery=${pn}`;
@@ -211,55 +178,22 @@ Respond with ONLY a raw JSON array, no markdown, starting with [ ending with ]:
     return dist.searchUrl || "";
   };
 
-  const selectPart = async (part) => {
+  const selectPart = (part) => {
     setSelectedPart(part);
     const [d1, d2, d3] = discoveredDistributors;
-    const initialUrls = {
+    setUrls({
       manufacturer: resolveManufacturerUrl(manufacturer, part),
       dist1: d1 ? resolveUrl(d1, part) : "",
       dist2: d2 ? resolveUrl(d2, part) : "",
       dist3: d3 ? resolveUrl(d3, part) : "",
-    };
-    const initialNames = {
+    });
+    setNames({
       manufacturer,
       dist1: d1?.name || "Distributor 1",
       dist2: d2?.name || "Distributor 2",
       dist3: d3?.name || "Distributor 3",
-    };
-    setUrls(initialUrls);
-    setNames(initialNames);
+    });
     setStep("configure");
-    setResolving(true);
-
-    // Auto-resolve all URLs to PDPs
-    try {
-      const sources = [
-        { key: "manufacturer", name: initialNames.manufacturer, url: initialUrls.manufacturer },
-        { key: "dist1", name: initialNames.dist1, url: initialUrls.dist1 },
-        { key: "dist2", name: initialNames.dist2, url: initialUrls.dist2 },
-        { key: "dist3", name: initialNames.dist3, url: initialUrls.dist3 },
-      ].filter(s => s.url);
-
-      const resolved = await resolvePDPUrls(sources, part.partNumber, manufacturer);
-
-      const newUrls = { ...initialUrls };
-      const newMeta = { manufacturer: { type: "pdp", confidence: "high" }, dist1: { type: "pdp", confidence: "high" }, dist2: { type: "pdp", confidence: "high" }, dist3: { type: "pdp", confidence: "high" } };
-
-      resolved.forEach(r => {
-        const match = sources.find(s => s.name === r.name);
-        if (match) {
-          newUrls[match.key] = r.url;
-          newMeta[match.key] = { type: r.type, confidence: r.confidence };
-        }
-      });
-
-      setUrls(newUrls);
-      setUrlMeta(newMeta);
-    } catch (e) {
-      // Non-fatal — user can still fix manually
-      console.warn("PDP resolution failed:", e.message);
-    }
-    setResolving(false);
   };
 
   const auditPage = async (url, siteName, role) => {
@@ -267,14 +201,21 @@ Respond with ONLY a raw JSON array, no markdown, starting with [ ending with ]:
     const roleNote = role === "manufacturer"
       ? "This is the MANUFACTURER site — source of truth. Do NOT evaluate pricing or availability."
       : "This is a DISTRIBUTOR site — evaluate ALL fields including price and availability.";
-    const prompt = `You are auditing a product listing for a content quality comparison.
-Site: ${siteName} | Role: ${role} | URL: ${url} | Part: ${selectedPart?.partNumber} | Manufacturer: ${manufacturer}
+    const prompt = `You are auditing product content quality for part number "${selectedPart?.partNumber}" from manufacturer "${manufacturer}".
+Site: ${siteName} | Role: ${role} | URL: ${url}
 ${roleNote}
-IMPORTANT: This URL should be a direct Product Detail Page (PDP). If it appears to be a search results page or category page instead, set overallScore to 0, set summary to explain it is not a PDP, and mark all fields as MISSING with score "low".
+
+IMPORTANT INSTRUCTIONS:
+- The URL provided may be either a direct Product Detail Page (PDP) or a search results page.
+- If it is a PDP: evaluate the content on that page directly.
+- If it is a search results page: evaluate based on what you know about how ${siteName} typically presents this specific part (${selectedPart?.partNumber}). Score based on the content quality that would appear on their best matching product listing for this part. Note in your summary that this was evaluated from a search page.
+- Never return a score of 0 just because the URL is a search page — always evaluate the best available content for this part on this site.
+
 For each field: "value" (max 30 words or "MISSING"), "score" ("high"/"medium"/"low"), "notes" (gap note if not high, else "").
 Fields: ${fields.map(f => f.key + ": " + f.label).join(", ")}
-Also: "overallScore" (0-100), "topGaps" (3 field keys), "summary" (2 sentences).
-Respond ONLY with valid JSON no markdown:
+Also: "overallScore" (0-100), "topGaps" (3 field keys), "summary" (2 sentences, note if evaluated from search page).
+
+Respond ONLY with valid JSON, no markdown:
 {"siteName":"${siteName}","role":"${role}","url":"${url}","overallScore":0,"topGaps":[],"summary":"","fields":{${fields.map(f => `"${f.key}":{"value":"","score":"low","notes":""}`).join(",")}}}`;
     const raw = await callClaude([{ role: "user", content: prompt }]);
     return parseJSON(raw);
@@ -288,11 +229,6 @@ Respond ONLY with valid JSON no markdown:
       { key: "dist3", role: "distributor" },
     ];
     if (sources.some(s => !urls[s.key].trim())) { setError("Fill in all 4 URLs."); return; }
-    const searchPageKeys = sources.filter(s => urlMeta[s.key]?.type === "search");
-    if (searchPageKeys.length > 0) {
-      setError(`These URLs still point to search pages: ${searchPageKeys.map(s => names[s.key]).join(", ")}. Please correct them before auditing.`);
-      return;
-    }
     setError(""); setLoading(true); setLog([]); setResults(null); setStep("audit");
     try {
       const all = [];
@@ -324,16 +260,6 @@ Respond ONLY with valid JSON no markdown:
   const RelBadge = ({ r }) => {
     const colors = { "authorized-preferred": "bg-blue-100 text-blue-700", "authorized": "bg-indigo-100 text-indigo-700", "broad-catalog": "bg-purple-100 text-purple-700", "regional": "bg-gray-100 text-gray-600" };
     return <span className={`text-xs px-2 py-0.5 rounded font-medium ${colors[r] || "bg-gray-100 text-gray-600"}`}>{r}</span>;
-  };
-
-  const UrlTypeBadge = ({ meta }) => {
-    if (!meta) return null;
-    const isPdp = meta.type === "pdp";
-    return (
-      <span className={`text-xs px-2 py-0.5 rounded font-bold ${isPdp ? "bg-green-100 text-green-700" : "bg-yellow-100 text-yellow-700"}`}>
-        {isPdp ? "✓ PDP" : "⚠ Search Page"}
-      </span>
-    );
   };
 
   const stepIdx = STEPS.indexOf(step);
@@ -552,11 +478,7 @@ Respond ONLY with valid JSON no markdown:
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h2 className="font-black text-gray-900 text-lg">Step 3 — Confirm URLs</h2>
-                <p className="text-sm text-gray-500">
-                  {resolving
-                    ? "⏳ Auto-resolving to direct product pages..."
-                    : "URLs resolved. Correct any still flagged as search pages."}
-                </p>
+                <p className="text-sm text-gray-500">Open each link to verify it's a product page. Paste the correct URL if not.</p>
               </div>
               <button onClick={() => setStep("select")} className="text-xs text-gray-400 hover:text-gray-600 underline">← Back</button>
             </div>
@@ -572,31 +494,37 @@ Respond ONLY with valid JSON no markdown:
                 { key: "dist2", label: "Distributor 2", icon: "🏪", accent: false },
                 { key: "dist3", label: "Distributor 3", icon: "🏪", accent: false },
               ].map(({ key, label, icon, accent }) => (
-                <div key={key} className={`border rounded-lg p-3 ${urlMeta[key]?.type === "search" ? "border-yellow-300 bg-yellow-50" : accent ? "border-blue-200 bg-blue-50" : "border-gray-100 bg-gray-50"}`}>
-                  <div className="flex items-center justify-between mb-2">
-                    <div className={`text-xs font-bold uppercase tracking-wide ${accent ? "text-blue-600" : "text-gray-500"}`}>{icon} {label}</div>
-                    {resolving
-                      ? <span className="text-xs text-gray-400 animate-pulse">Resolving...</span>
-                      : <UrlTypeBadge meta={urlMeta[key]} />}
+                <div key={key} className={`border rounded-lg p-3 ${accent ? "border-blue-200 bg-blue-50" : "border-gray-100 bg-gray-50"}`}>
+                  <div className={`text-xs font-bold uppercase tracking-wide mb-2 ${accent ? "text-blue-600" : "text-gray-500"}`}>{icon} {label}</div>
+                  <input
+                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mb-2 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
+                    placeholder="Display name"
+                    value={names[key]}
+                    onChange={e => setNames(n => ({ ...n, [key]: e.target.value }))} />
+                  <div className="flex gap-2 items-center">
+                    <input
+                      className="flex-1 border border-gray-200 rounded px-2 py-1.5 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
+                      placeholder="https://..."
+                      value={urls[key]}
+                      onChange={e => setUrls(u => ({ ...u, [key]: e.target.value }))} />
+                    {urls[key] && (
+                      <a
+                        href={urls[key]}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="shrink-0 text-xs bg-gray-800 hover:bg-gray-700 text-white font-bold px-3 py-1.5 rounded"
+                        title="Open in new tab">
+                        Open ↗
+                      </a>
+                    )}
                   </div>
-                  <input className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mb-2 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
-                    placeholder="Display name" value={names[key]} onChange={e => setNames(n => ({ ...n, [key]: e.target.value }))} />
-                  <input className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
-                    placeholder="https://..." value={urls[key]}
-                    onChange={e => {
-                      setUrls(u => ({ ...u, [key]: e.target.value }));
-                      setUrlMeta(m => ({ ...m, [key]: { type: "pdp", confidence: "high" } }));
-                    }} />
-                  {urlMeta[key]?.type === "search" && (
-                    <div className="text-xs text-yellow-700 mt-1.5">⚠ This appears to be a search page. Please paste the direct product URL.</div>
-                  )}
                 </div>
               ))}
             </div>
             {error && <div className="text-red-600 text-sm mb-3">{error}</div>}
-            <button onClick={runAudit} disabled={loading || resolving}
+            <button onClick={runAudit} disabled={loading}
               className="bg-green-600 hover:bg-green-700 disabled:bg-green-300 text-white font-bold px-6 py-2.5 rounded-lg text-sm">
-              {resolving ? "Resolving URLs..." : "Run Content Audit →"}
+              Run Content Audit →
             </button>
           </div>
         )}

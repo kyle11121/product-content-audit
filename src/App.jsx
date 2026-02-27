@@ -43,54 +43,73 @@ const DISTRIBUTOR_REGISTRY = [
   { name: "Farnell", domain: "farnell.com", pdpAddressable: false, note: "Returns search results page — not directly addressable by part number" },
 ];
 
-const buildFallbackUrl = (domain, partNumber, mfrName) => {
+// Build a search-page fallback — never a google.com URL
+const buildFallbackUrl = (domain, partNumber) => {
   const pn = encodeURIComponent(partNumber);
-  const mfr = encodeURIComponent(mfrName);
-  if (domain.includes("digikey")) return `https://www.digikey.com/en/products/filter?keywords=${pn}`;
-  if (domain.includes("arrow")) return `https://www.arrow.com/en/products/search?q=${pn}`;
-  if (domain.includes("mouser")) return `https://www.mouser.com/c/?q=${pn}`;
-  if (domain.includes("newark")) return `https://www.newark.com/search?st=${pn}`;
-  if (domain.includes("rs-online")) return `https://www.rs-online.com/web/c/?searchTerm=${pn}`;
-  if (domain.includes("grainger")) return `https://www.grainger.com/search?searchQuery=${pn}`;
+  if (domain.includes("digikey"))    return `https://www.digikey.com/en/products/filter?keywords=${pn}`;
+  if (domain.includes("arrow"))      return `https://www.arrow.com/en/products/search?q=${pn}`;
+  if (domain.includes("mouser"))     return `https://www.mouser.com/c/?q=${pn}`;
+  if (domain.includes("newark"))     return `https://www.newark.com/search?st=${pn}`;
+  if (domain.includes("rs-online"))  return `https://www.rs-online.com/web/c/?searchTerm=${pn}`;
+  if (domain.includes("grainger"))   return `https://www.grainger.com/search?searchQuery=${pn}`;
   if (domain.includes("alliedelec")) return `https://www.alliedelec.com/search/?q=${pn}`;
-  if (domain.includes("galco")) return `https://www.galco.com/buy/${mfr}/${pn}`;
-  if (domain.includes("tme")) return `https://www.tme.eu/en/katalog/?search=${pn}`;
-  if (domain.includes("farnell")) return `https://www.farnell.com/search?st=${pn}`;
-  return `https://www.google.com/search?q=${pn}+${mfr}+${domain}`;
+  if (domain.includes("galco"))      return `https://www.galco.com/scripts/cgiip.exe/WService=gal01/cgisrch.r?searchstr=${pn}`;
+  if (domain.includes("tme"))        return `https://www.tme.eu/en/katalog/?search=${pn}`;
+  if (domain.includes("farnell"))    return `https://www.farnell.com/search?st=${pn}`;
+  if (domain.includes("fastenal"))   return `https://www.fastenal.com/products/search?term=${pn}`;
+  if (domain.includes("uline"))      return `https://www.uline.com/BL_8901/Product-Catalog?keywords=${pn}`;
+  if (domain.includes("mcmaster"))   return `https://www.mcmaster.com/#${pn}`;
+  if (domain.includes("mscdirect")) return `https://www.mscdirect.com/search/results?searchterm=${pn}`;
+  // Generic: use the domain's own search rather than google.com
+  return `https://${domain}/search?q=${pn}`;
 };
 
-const resolveManufacturerUrl = (mfr, part) => {
+// Manufacturer domain lookup — normalized key matching, no false-positive on "te"
+const MFR_DOMAINS = {
+  "belden":                    (pn) => `https://www.belden.com/products/${pn}`,
+  "amphenol":                  (pn) => `https://www.amphenol.com/product/${pn}`,
+  "molex":                     (pn) => `https://www.molex.com/en-us/products/part-detail/${pn}`,
+  "phoenixcontact":            (pn) => `https://www.phoenixcontact.com/en-us/products/${pn}`,
+  "wago":                      (pn) => `https://www.wago.com/global/search?text=${encodeURIComponent(pn)}`,
+  "siemens":                   (pn) => `https://mall.industry.siemens.com/mall/en/us/Catalog/product/?mlfb=${encodeURIComponent(pn)}`,
+  "parker":                    (pn) => `https://www.parker.com/portal/site/PARKER/menuitem.search/?q=${encodeURIComponent(pn)}`,
+  "honeywell":                 (pn) => `https://sps.honeywell.com/us/en/search#q=${encodeURIComponent(pn)}`,
+  "teconnectivity":            (pn) => `https://www.te.com/en/search.html#q=${encodeURIComponent(pn)}`,
+  "te connectivity":           (pn) => `https://www.te.com/en/search.html#q=${encodeURIComponent(pn)}`,
+  "omron":                     (pn) => `https://www.ia.omron.com/search/keyword/?q=${encodeURIComponent(pn)}`,
+  "schneiderelectric":         (pn) => `https://www.se.com/us/en/product/search/#q=${encodeURIComponent(pn)}`,
+  "eaton":                     (pn) => `https://www.eaton.com/us/en-us/catalog/search.html?q=${encodeURIComponent(pn)}`,
+  "panduit":                   (pn) => `https://www.panduit.com/en/search.html#q=${encodeURIComponent(pn)}`,
+  "corning":                   (pn) => `https://www.corning.com/optical-communications/worldwide/en/home/products/search.html#q=${encodeURIComponent(pn)}`,
+  "3m":                        (pn) => `https://www.3m.com/3M/en_US/p/s/i/~~${pn}/`,
+  "leviton":                   (pn) => `https://www.leviton.com/en/search#q=${encodeURIComponent(pn)}`,
+  "hubbell":                   (pn) => `https://www.hubbell.com/hubbell/en/search?q=${encodeURIComponent(pn)}`,
+  "commscope":                 (pn) => `https://www.commscope.com/product-type/search/?q=${encodeURIComponent(pn)}`,
+  "fluke":                     (pn) => `https://www.fluke.com/en-us/search#q=${encodeURIComponent(pn)}`,
+  // PIP / Protective Industrial Products — multiple aliases
+  "pip":                       (pn) => `https://www.pipglobal.com/en/search?q=${encodeURIComponent(pn)}`,
+  "pipglobal":                 (pn) => `https://www.pipglobal.com/en/search?q=${encodeURIComponent(pn)}`,
+  "protectiveindustrialproducts": (pn) => `https://www.pipglobal.com/en/search?q=${encodeURIComponent(pn)}`,
+  "protectiveindustrial":      (pn) => `https://www.pipglobal.com/en/search?q=${encodeURIComponent(pn)}`,
+};
+
+const resolveManufacturerUrl = (mfrName, part) => {
   if (part.manufacturerUrl) return part.manufacturerUrl;
   const pn = part.partNumber;
-  const m = mfr.toLowerCase().replace(/\s+/g, "");
-  const known = {
-    belden: `https://www.belden.com/products/${pn}`,
-    amphenol: `https://www.amphenol.com/product/${pn}`,
-    molex: `https://www.molex.com/en-us/products/part-detail/${pn}`,
-    phoenix: `https://www.phoenixcontact.com/en-us/products/${pn}`,
-    wago: `https://www.wago.com/global/search?text=${pn}`,
-    siemens: `https://mall.industry.siemens.com/mall/en/us/Catalog/product/?mlfb=${encodeURIComponent(pn)}`,
-    parker: `https://www.parker.com/portal/site/PARKER/menuitem.search/?q=${pn}`,
-    honeywell: `https://sps.honeywell.com/us/en/search#q=${pn}`,
-    te: `https://www.te.com/en/search.html#q=${pn}`,
-    teconnectivity: `https://www.te.com/en/search.html#q=${pn}`,
-    omron: `https://www.ia.omron.com/search/keyword/?q=${pn}`,
-    schneider: `https://www.se.com/us/en/product/search/#q=${pn}`,
-    eaton: `https://www.eaton.com/us/en-us/catalog/search.html?q=${pn}`,
-    panduit: `https://www.panduit.com/en/search.html#q=${pn}`,
-    corning: `https://www.corning.com/optical-communications/worldwide/en/home/products/search.html#q=${pn}`,
-    "3m": `https://www.3m.com/3M/en_US/p/s/i/~~${pn}/`,
-    leviton: `https://www.leviton.com/en/search#q=${pn}`,
-    hubbell: `https://www.hubbell.com/hubbell/en/search?q=${pn}`,
-    commscope: `https://www.commscope.com/product-type/search/?q=${pn}`,
-    fluke: `https://www.fluke.com/en-us/search#q=${pn}`,
-    pip: `https://www.pipglobal.com/en/search?q=${pn}`,
-    "protective industrial": `https://www.pipglobal.com/en/search?q=${pn}`,
-  };
-  for (const [key, url] of Object.entries(known)) {
-    if (m.includes(key)) return url;
+  // Normalize: lowercase, strip spaces/punctuation
+  const m = mfrName.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+  // Exact key match first
+  if (MFR_DOMAINS[m]) return MFR_DOMAINS[m](pn);
+
+  // Partial key match — but require the key to be ≥4 chars to avoid false positives like "te"
+  for (const [key, fn] of Object.entries(MFR_DOMAINS)) {
+    const normKey = key.replace(/[^a-z0-9]/g, "");
+    if (normKey.length >= 4 && m.includes(normKey)) return fn(pn);
   }
-  return `https://www.${m.replace(/\s+/g, "")}.com/search?q=${encodeURIComponent(pn)}`;
+
+  // Generic fallback using actual manufacturer domain
+  return `https://www.${m}.com/search?q=${encodeURIComponent(pn)}`;
 };
 
 const callClaude = async (messages, maxTokens = 2000) => {
@@ -104,7 +123,7 @@ const callClaude = async (messages, maxTokens = 2000) => {
   return data.content.filter(b => b.type === "text").map(b => b.text).join("");
 };
 
-// Search Google via SerpAPI and return top organic results
+// Search Google via SerpAPI — returns [] on any failure
 const serpSearch = async (query) => {
   try {
     const res = await fetch("/api/search", {
@@ -113,40 +132,63 @@ const serpSearch = async (query) => {
       body: JSON.stringify({ query }),
     });
     const data = await res.json();
-    if (data.error) return [];
+    if (data.error) {
+      console.warn("SerpAPI error:", data.error);
+      return [];
+    }
     return data.results || [];
-  } catch { return []; }
+  } catch (e) {
+    console.warn("serpSearch fetch failed:", e.message);
+    return [];
+  }
 };
 
 // Use SerpAPI + Claude to find best PDP URL for a distributor
+// Returns: { url, source } where source is "serp" | "fallback"
 const resolveUrlViaSerpAPI = async (partNumber, mfrName, distName, domain) => {
-  const query = `"${partNumber}" ${mfrName} site:${domain}`;
+  const query = `"${partNumber}" site:${domain}`;
   const results = await serpSearch(query);
-  if (!results.length) return null;
 
-  // Let Claude pick the best result
+  if (!results.length) {
+    // Try broader query without quotes
+    const broader = await serpSearch(`${partNumber} ${mfrName} ${domain}`);
+    if (!broader.length) return null;
+    results.push(...broader);
+  }
+
+  // Filter to only results on the correct domain before sending to Claude
+  const onDomain = results.filter(r => {
+    try { return new URL(r.url).hostname.includes(domain.replace("www.", "")); }
+    catch { return false; }
+  });
+
+  const candidates = onDomain.length ? onDomain : results;
+
   const prompt = `You are selecting the best product detail page URL for part number "${partNumber}" from manufacturer "${mfrName}" on ${distName} (${domain}).
 
-Here are Google search results for: ${query}
-
-${results.map((r, i) => `${i+1}. Title: ${r.title}\n   URL: ${r.url}\n   Snippet: ${r.snippet}`).join("\n\n")}
+Search results:
+${candidates.slice(0, 5).map((r, i) => `${i+1}. Title: ${r.title}\n   URL: ${r.url}\n   Snippet: ${r.snippet || ""}`).join("\n\n")}
 
 Select the single best URL that:
-- Is on the ${domain} domain
-- Goes directly to a product detail page for this specific part
-- NOT a search results page, category page, or unrelated page
+- Is on the ${domain} domain (or a subdomain)
+- Goes directly to a product detail page for part number "${partNumber}"
+- Is NOT a search results page, category page, or unrelated product
 
-Respond with ONLY a JSON object:
+Respond with ONLY valid JSON, no markdown:
 {"url":"","reason":"","confidence":"high|medium|low"}
 
-If no result is a good PDP match, return {"url":"","reason":"no PDP found","confidence":"low"}`;
+If no result is a good PDP match, return: {"url":"","reason":"no PDP found","confidence":"low"}`;
 
   try {
     const raw = await callClaude([{ role: "user", content: prompt }], 500);
     const clean = raw.replace(/```json|```/g, "").trim();
     const parsed = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1));
-    return parsed.url || null;
-  } catch { return null; }
+    if (parsed.url && parsed.confidence !== "low") return parsed.url;
+    return null;
+  } catch (e) {
+    console.warn("Claude URL selection failed:", e.message);
+    return null;
+  }
 };
 
 const fetchPageContent = async (url) => {
@@ -225,7 +267,7 @@ export default function App() {
   const [selectedDistributors, setSelectedDistributors] = useState([]);
   const [urls, setUrls] = useState({});
   const [names, setNames] = useState({});
-  const [urlStatus, setUrlStatus] = useState({}); // "resolving" | "resolved" | "fallback"
+  const [urlStatus, setUrlStatus] = useState({});
   const [results, setResults] = useState(null);
   const [activeTab, setActiveTab] = useState("gaps");
   const [log, setLog] = useState([]);
@@ -277,8 +319,8 @@ Respond with ONLY a raw JSON array, no markdown:
     const data = discoveredDistributors.map(dist => {
       const registry = DISTRIBUTOR_REGISTRY.find(r => dist.domain?.includes(r.domain.split(".")[0]));
       const pdpAddressable = registry ? registry.pdpAddressable : false;
-      const note = registry ? registry.note : "URL pattern unknown — defaults to search page";
-      return { ...dist, pdpAddressable, note, url: buildFallbackUrl(dist.domain, part.partNumber, manufacturer) };
+      const note = registry ? registry.note : "URL pattern unknown — will resolve via search";
+      return { ...dist, pdpAddressable, note, url: buildFallbackUrl(dist.domain, part.partNumber) };
     });
     setDiscoverabilityData(data);
     setSelectedDistributors([]);
@@ -299,12 +341,13 @@ Respond with ONLY a raw JSON array, no markdown:
     if (selectedDistributors.length !== 5) { setError("Select exactly 5 distributors to audit."); return; }
     setError("");
 
-    // Build initial URL map with fallbacks
-    const urlMap = { manufacturer: resolveManufacturerUrl(manufacturer, selectedPart) };
+    const mfrUrl = resolveManufacturerUrl(manufacturer, selectedPart);
+    const urlMap = { manufacturer: mfrUrl };
     const nameMap = { manufacturer };
-    const statusMap = { manufacturer: "resolved" };
+    // Start all as "resolving" — nothing gets "resolved" until SerpAPI confirms
+    const statusMap = { manufacturer: "resolving" };
     selectedDistributors.forEach((d, i) => {
-      urlMap[`dist${i+1}`] = d.url;
+      urlMap[`dist${i+1}`] = buildFallbackUrl(d.domain, selectedPart.partNumber);
       nameMap[`dist${i+1}`] = d.name;
       statusMap[`dist${i+1}`] = "resolving";
     });
@@ -313,18 +356,18 @@ Respond with ONLY a raw JSON array, no markdown:
     setUrlStatus(statusMap);
     setStep("configure");
 
-    // Also resolve manufacturer URL via SerpAPI if it looks like a search/fallback
-    const mfrUrl = urlMap.manufacturer;
-    if (mfrUrl.includes("search") || mfrUrl.includes("google.com")) {
-      const mfrDomain = manufacturer.toLowerCase().replace(/\s+/g, "") + ".com";
-      const resolved = await resolveUrlViaSerpAPI(selectedPart.partNumber, manufacturer, manufacturer, mfrDomain);
-      if (resolved) {
-        setUrls(u => ({ ...u, manufacturer: resolved }));
-        setUrlStatus(s => ({ ...s, manufacturer: "resolved" }));
-      }
+    // Resolve manufacturer URL — if it looks like a generic search, try SerpAPI
+    const mfrDomainGuess = manufacturer.toLowerCase().replace(/[^a-z0-9]/g, "") + ".com";
+    const resolvedMfr = await resolveUrlViaSerpAPI(selectedPart.partNumber, manufacturer, manufacturer, mfrDomainGuess);
+    if (resolvedMfr) {
+      setUrls(u => ({ ...u, manufacturer: resolvedMfr }));
+      setUrlStatus(s => ({ ...s, manufacturer: "resolved" }));
+    } else {
+      // Keep the known-pattern URL but mark resolved (it's the best we have)
+      setUrlStatus(s => ({ ...s, manufacturer: mfrUrl.includes("google.com") ? "fallback" : "resolved" }));
     }
 
-    // Resolve each distributor URL via SerpAPI in parallel
+    // Resolve each distributor via SerpAPI in parallel
     await Promise.all(selectedDistributors.map(async (d, i) => {
       const key = `dist${i+1}`;
       const resolved = await resolveUrlViaSerpAPI(selectedPart.partNumber, manufacturer, d.name, d.domain);
@@ -332,6 +375,7 @@ Respond with ONLY a raw JSON array, no markdown:
         setUrls(u => ({ ...u, [key]: resolved }));
         setUrlStatus(s => ({ ...s, [key]: "resolved" }));
       } else {
+        // Fallback = distributor search page on their own domain (never google.com)
         setUrlStatus(s => ({ ...s, [key]: "fallback" }));
       }
     }));
@@ -378,6 +422,9 @@ Respond ONLY with valid JSON, no markdown:
   const runAudit = async () => {
     const keys = ["manufacturer", ...selectedDistributors.map((_, i) => `dist${i+1}`)];
     if (keys.some(k => !urls[k]?.trim())) { setError("Fill in all URLs."); return; }
+    // Block google.com URLs from being audited
+    const badUrl = keys.find(k => urls[k]?.includes("google.com/search"));
+    if (badUrl) { setError(`${names[badUrl]} URL is a Google search page — paste the actual product URL.`); return; }
     setError(""); setLoading(true); setLog([]); setResults(null); setStep("audit");
     try {
       const all = [];
@@ -422,8 +469,8 @@ Respond ONLY with valid JSON, no markdown:
 
   const UrlStatusBadge = ({ status }) => {
     if (status === "resolving") return <span className="text-xs text-blue-500 animate-pulse font-medium">⏳ Finding PDP...</span>;
-    if (status === "resolved") return <span className="text-xs text-green-600 font-medium">✓ PDP Found</span>;
-    if (status === "fallback") return <span className="text-xs text-yellow-600 font-medium">⚠ No PDP found — edit manually</span>;
+    if (status === "resolved")  return <span className="text-xs text-green-600 font-medium">✓ PDP Found</span>;
+    if (status === "fallback")  return <span className="text-xs text-yellow-600 font-medium">⚠ No PDP found — edit manually</span>;
     return null;
   };
 
@@ -740,7 +787,11 @@ Respond ONLY with valid JSON, no markdown:
                   <div className="flex gap-2 items-center">
                     <input className="flex-1 border border-gray-200 rounded px-2 py-1.5 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
                       placeholder="https://..." value={urls[key] || ""}
-                      onChange={e => setUrls(u => ({ ...u, [key]: e.target.value }))} />
+                      onChange={e => {
+                        setUrls(u => ({ ...u, [key]: e.target.value }));
+                        // If user manually edits, clear the warning
+                        if (urlStatus[key] === "fallback") setUrlStatus(s => ({ ...s, [key]: "resolved" }));
+                      }} />
                     {urls[key] && (
                       <a href={urls[key]} target="_blank" rel="noopener noreferrer"
                         className="shrink-0 text-xs bg-gray-800 hover:bg-gray-700 text-white font-bold px-3 py-1.5 rounded">
@@ -748,6 +799,11 @@ Respond ONLY with valid JSON, no markdown:
                       </a>
                     )}
                   </div>
+                  {urlStatus[key] === "fallback" && (
+                    <div className="mt-1.5 text-xs text-yellow-700 bg-yellow-100 rounded px-2 py-1">
+                      No PDP found via search. This is a distributor search page — paste the actual product URL above for best results.
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

@@ -92,6 +92,52 @@ const resolveManufacturerUrl = (mfr, part) => {
   return `https://www.${m}.com/search?q=${encodeURIComponent(pn)}`;
 };
 
+// Fix 1: correct Mouser search URL pattern
+const resolveDistributorSearchUrl = (dist, partNumber, mfrName) => {
+  const domain = dist.domain?.toLowerCase() || "";
+  const pn = encodeURIComponent(partNumber);
+  const mfr = encodeURIComponent(mfrName);
+  if (domain.includes("digikey")) return `https://www.digikey.com/en/products/filter?keywords=${pn}`;
+  if (domain.includes("mouser")) return `https://www.mouser.com/c/?q=${pn}`;
+  if (domain.includes("arrow")) return `https://www.arrow.com/en/products/search?q=${pn}`;
+  if (domain.includes("newark")) return `https://www.newark.com/search?st=${pn}`;
+  if (domain.includes("rs-online")) return `https://www.rs-online.com/web/c/?searchTerm=${pn}`;
+  if (domain.includes("grainger")) return `https://www.grainger.com/search?searchQuery=${pn}`;
+  if (domain.includes("msc")) return `https://www.mscdirect.com/browse/tn/?searchterm=${pn}`;
+  if (domain.includes("allied")) return `https://www.alliedelec.com/search/?q=${pn}`;
+  if (domain.includes("galco")) return `https://www.galco.com/buy/${mfr}/${pn}`;
+  return dist.searchUrl || `https://www.google.com/search?q=${pn}+${mfr}+site:${domain}`;
+};
+
+// Export results to CSV
+const exportCSV = (results, partNumber, manufacturer, category, names) => {
+  const all = [results.manufacturer, ...results.distributors];
+  const fields = FIELD_DEFINITIONS;
+  const headers = ["Field", ...all.map(r => `${r.siteName} Score`), ...all.map(r => `${r.siteName} Value`), ...all.map(r => `${r.siteName} Notes`)];
+  const rows = [
+    [`Part: ${partNumber}`, `Manufacturer: ${manufacturer}`, `Category: ${category}`, `Date: ${new Date().toLocaleDateString()}`],
+    [],
+    ["OVERALL SCORES", ...all.map(r => `${r.overallScore}/100`), ...all.map(() => ""), ...all.map(() => "")],
+    ["SUMMARY", ...all.map(r => `"${r.summary.replace(/"/g, '""')}"`), ...all.map(() => ""), ...all.map(() => "")],
+    [],
+    headers,
+    ...fields.map(f => [
+      f.label,
+      ...all.map(r => r.fields?.[f.key]?.score?.toUpperCase() || "N/A"),
+      ...all.map(r => `"${(r.fields?.[f.key]?.value || "MISSING").replace(/"/g, '""')}"`),
+      ...all.map(r => `"${(r.fields?.[f.key]?.notes || "").replace(/"/g, '""')}"`)
+    ])
+  ];
+  const csv = rows.map(r => r.join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `content-audit-${partNumber}-${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
 export default function App() {
   const [step, setStep] = useState("discover");
   const [manufacturer, setManufacturer] = useState("");
@@ -121,13 +167,7 @@ Identify the top 5 best-selling or most widely distributed parts from manufactur
 
 Criteria: high distributor catalog breadth, industry-standard, high volume, broad cross-references.
 
-For each part, provide search URLs only — do not attempt to construct PDP URLs as these require database IDs you cannot know reliably.
-
-Use these search URL patterns:
-- Digi-Key: https://www.digikey.com/en/products/filter?keywords=[partNumber]
-- Mouser: https://www.mouser.com/Search/Refine?Keyword=[partNumber]
-- Arrow: https://www.arrow.com/en/products/search?q=[partNumber]
-- Manufacturer: use their known domain + search path
+Do not attempt to construct PDP URLs — these require database IDs you cannot know reliably. Leave all URL fields as empty string.
 
 Respond with ONLY a raw JSON array, no markdown, starting with [ and ending with ]:
 [{"partNumber":"","name":"","confidence":"high|medium|low","sources":[],"manufacturerUrl":"","digikeyUrl":"","mouserUrl":"","arrowUrl":"","reason":""}]` }]);
@@ -139,16 +179,7 @@ Identify the top 3 distributors for manufacturer "${manufacturer}" in the catego
 
 Evaluate based on: authorized agreements, SKU breadth, inventory depth, channel priority, vertical fit.
 
-Known distributor search URL patterns:
-- Digi-Key: https://www.digikey.com/en/products/filter?keywords=[partNumber]
-- Mouser: https://www.mouser.com/Search/Refine?Keyword=[partNumber]
-- Arrow: https://www.arrow.com/en/products/search?q=[partNumber]
-- Newark: https://www.newark.com/search?st=[partNumber]
-- RS Components: https://www.rs-online.com/web/c/?searchTerm=[partNumber]
-- Grainger: https://www.grainger.com/search?searchQuery=[partNumber]
-- MSC: https://www.mscdirect.com/browse/tn/?searchterm=[partNumber]
-- Allied: https://www.alliedelec.com/search/?q=[partNumber]
-- Galco: https://www.galco.com/buy/${manufacturer}/[partNumber]
+For the domain field use the base domain only e.g. "digikey.com", "mouser.com", "newark.com", "arrow.com", "rs-online.com", "grainger.com", "mscdirect.com", "alliedelec.com", "galco.com"
 
 Respond with ONLY a raw JSON array, no markdown, starting with [ ending with ]:
 [{"name":"","confidence":"high","relationship":"authorized","verticalFit":"","searchUrl":"","domain":""}]` }]);
@@ -163,29 +194,14 @@ Respond with ONLY a raw JSON array, no markdown, starting with [ ending with ]:
     setLoading(false);
   };
 
-  const resolveUrl = (dist, part) => {
-    const domain = dist.domain?.toLowerCase() || "";
-    const pn = encodeURIComponent(part.partNumber);
-    if (domain.includes("digikey")) return `https://www.digikey.com/en/products/filter?keywords=${pn}`;
-    if (domain.includes("mouser")) return `https://www.mouser.com/Search/Refine?Keyword=${pn}`;
-    if (domain.includes("arrow")) return `https://www.arrow.com/en/products/search?q=${pn}`;
-    if (domain.includes("newark")) return `https://www.newark.com/search?st=${pn}`;
-    if (domain.includes("rs-online")) return `https://www.rs-online.com/web/c/?searchTerm=${pn}`;
-    if (domain.includes("grainger")) return `https://www.grainger.com/search?searchQuery=${pn}`;
-    if (domain.includes("msc")) return `https://www.mscdirect.com/browse/tn/?searchterm=${pn}`;
-    if (domain.includes("allied")) return `https://www.alliedelec.com/search/?q=${pn}`;
-    if (domain.includes("galco")) return `https://www.galco.com/buy/${encodeURIComponent(manufacturer)}/${pn}`;
-    return dist.searchUrl || "";
-  };
-
   const selectPart = (part) => {
     setSelectedPart(part);
     const [d1, d2, d3] = discoveredDistributors;
     setUrls({
       manufacturer: resolveManufacturerUrl(manufacturer, part),
-      dist1: d1 ? resolveUrl(d1, part) : "",
-      dist2: d2 ? resolveUrl(d2, part) : "",
-      dist3: d3 ? resolveUrl(d3, part) : "",
+      dist1: d1 ? resolveDistributorSearchUrl(d1, part.partNumber, manufacturer) : "",
+      dist2: d2 ? resolveDistributorSearchUrl(d2, part.partNumber, manufacturer) : "",
+      dist3: d3 ? resolveDistributorSearchUrl(d3, part.partNumber, manufacturer) : "",
     });
     setNames({
       manufacturer,
@@ -205,15 +221,16 @@ Respond with ONLY a raw JSON array, no markdown, starting with [ ending with ]:
 Site: ${siteName} | Role: ${role} | URL: ${url}
 ${roleNote}
 
-IMPORTANT INSTRUCTIONS:
-- The URL provided may be either a direct Product Detail Page (PDP) or a search results page.
-- If it is a PDP: evaluate the content on that page directly.
-- If it is a search results page: evaluate based on what you know about how ${siteName} typically presents this specific part (${selectedPart?.partNumber}). Score based on the content quality that would appear on their best matching product listing for this part. Note in your summary that this was evaluated from a search page.
-- Never return a score of 0 just because the URL is a search page — always evaluate the best available content for this part on this site.
+IMPORTANT SCORING RULES:
+- The URL may be a direct PDP or a search results page. Either way, score based on your knowledge of how ${siteName} presents part "${selectedPart?.partNumber}".
+- Never return overallScore of 0 unless the site genuinely has no content for this part whatsoever.
+- Score each field based on what ${siteName} typically provides for this part, regardless of URL type.
+- Be consistent: if a field is present and complete, score "high". Partially present = "medium". Missing = "low".
+- "topGaps" must only contain field keys where YOU scored that field "low" or "medium" in this response. Do not list fields as gaps if you scored them "high".
 
-For each field: "value" (max 30 words or "MISSING"), "score" ("high"/"medium"/"low"), "notes" (gap note if not high, else "").
+For each field: "value" (max 30 words or "MISSING"), "score" ("high"/"medium"/"low"), "notes" (brief gap note if not high, else "").
 Fields: ${fields.map(f => f.key + ": " + f.label).join(", ")}
-Also: "overallScore" (0-100), "topGaps" (3 field keys), "summary" (2 sentences, note if evaluated from search page).
+Also: "overallScore" (0-100 weighted average of field scores: high=100, medium=50, low=0), "topGaps" (up to 3 field keys where score is low/medium), "summary" (2 sentences).
 
 Respond ONLY with valid JSON, no markdown:
 {"siteName":"${siteName}","role":"${role}","url":"${url}","overallScore":0,"topGaps":[],"summary":"","fields":{${fields.map(f => `"${f.key}":{"value":"","score":"low","notes":""}`).join(",")}}}`;
@@ -264,6 +281,7 @@ Respond ONLY with valid JSON, no markdown:
 
   const stepIdx = STEPS.indexOf(step);
 
+  // Fix 2: gap report only shows fields where manufacturer scores HIGH AND distributor scores low/medium
   const renderGapReport = () => {
     if (!results) return null;
     const mfr = results.manufacturer;
@@ -271,9 +289,10 @@ Respond ONLY with valid JSON, no markdown:
     const gapsByField = {};
     SHARED_FIELDS.forEach(f => {
       const ms = mfr.fields?.[f.key]?.score;
+      if (ms !== "high") return; // only include fields where manufacturer actually scores high
       dists.forEach(d => {
         const ds = d.fields?.[f.key]?.score;
-        if (ms === "high" && (ds === "low" || ds === "medium")) {
+        if (ds === "low" || ds === "medium") {
           if (!gapsByField[f.key]) gapsByField[f.key] = [];
           gapsByField[f.key].push({ dist: d.siteName, score: ds, notes: d.fields?.[f.key]?.notes });
         }
@@ -298,7 +317,7 @@ Respond ONLY with valid JSON, no markdown:
             </div>
           ))}
         </div>
-        {Object.keys(gapsByField).length > 0 && (
+        {Object.keys(gapsByField).length > 0 ? (
           <div>
             <h3 className="font-bold text-gray-800 mb-2">Content Drift — Manufacturer Has It, Distributors Don't</h3>
             <div className="space-y-2">
@@ -314,6 +333,10 @@ Respond ONLY with valid JSON, no markdown:
                 );
               })}
             </div>
+          </div>
+        ) : (
+          <div className="bg-green-50 border border-green-200 rounded p-4 text-green-800 text-sm font-medium">
+            ✓ No content drift detected — distributors are keeping up with manufacturer content.
           </div>
         )}
       </div>
@@ -508,12 +531,8 @@ Respond ONLY with valid JSON, no markdown:
                       value={urls[key]}
                       onChange={e => setUrls(u => ({ ...u, [key]: e.target.value }))} />
                     {urls[key] && (
-                      <a
-                        href={urls[key]}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="shrink-0 text-xs bg-gray-800 hover:bg-gray-700 text-white font-bold px-3 py-1.5 rounded"
-                        title="Open in new tab">
+                      <a href={urls[key]} target="_blank" rel="noopener noreferrer"
+                        className="shrink-0 text-xs bg-gray-800 hover:bg-gray-700 text-white font-bold px-3 py-1.5 rounded">
                         Open ↗
                       </a>
                     )}
@@ -550,8 +569,18 @@ Respond ONLY with valid JSON, no markdown:
                 <span className="text-gray-400 text-sm ml-2">· {manufacturer} · {category}</span>
                 <div className="text-xs text-gray-400 mt-0.5">vs. {discoveredDistributors.map(d => d.name).join(", ")}</div>
               </div>
-              <button onClick={() => { setStep("discover"); setResults(null); setLog([]); setDiscoveredParts([]); setDiscoveredDistributors([]); }}
-                className="text-xs text-gray-400 hover:text-gray-600 underline">New Audit</button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => exportCSV(results, selectedPart?.partNumber, manufacturer, category, names)}
+                  className="text-xs bg-gray-800 hover:bg-gray-700 text-white font-bold px-4 py-2 rounded-lg">
+                  Export CSV ↓
+                </button>
+                <button
+                  onClick={() => { setStep("discover"); setResults(null); setLog([]); setDiscoveredParts([]); setDiscoveredDistributors([]); }}
+                  className="text-xs text-gray-400 hover:text-gray-600 underline">
+                  New Audit
+                </button>
+              </div>
             </div>
             <div className="flex border-b border-gray-200">
               {[{ id: "gaps", label: "Gap Report" }, { id: "matrix", label: "Full Matrix" }].map(t => (

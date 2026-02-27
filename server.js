@@ -1,7 +1,6 @@
 const express = require("express");
 const path = require("path");
 const app = express();
-
 app.use(express.json({ limit: "4mb" }));
 app.use(express.static(path.join(__dirname, "dist")));
 
@@ -29,6 +28,7 @@ app.post("/api/search", async (req, res) => {
     const params = new URLSearchParams({ q: query, api_key: k, engine: "google", num: "5", gl: "us", hl: "en" });
     const r = await fetch(`https://serpapi.com/search?${params}`);
     const data = await r.json();
+    if (data.error) return res.status(502).json({ error: `SerpAPI: ${data.error}` });
     const results = (data.organic_results || []).map(r => ({ title: r.title, url: r.link, snippet: r.snippet }));
     res.json({ results });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -38,6 +38,10 @@ app.post("/api/search", async (req, res) => {
 app.post("/api/fetch-page", async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: "url required" });
+  // Block google.com — should never reach Jina
+  if (url.includes("google.com/search")) {
+    return res.status(400).json({ error: "Cannot fetch Google search pages — URL was not resolved to a PDP" });
+  }
   try {
     const r = await fetch(`https://r.jina.ai/${url}`, {
       headers: { "Accept": "text/plain", "X-Return-Format": "text", "X-Timeout": "15" }

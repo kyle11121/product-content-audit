@@ -389,33 +389,49 @@ Respond with ONLY a raw JSON array, no markdown:
 
     addLog(`    Fetching live content for ${siteName}...`);
     const pageContent = await fetchPageContent(url);
-    const contentSource = pageContent ? "live" : "training";
 
-    const contextSection = pageContent
-      ? `LIVE PAGE CONTENT (from ${url}):\n---\n${pageContent}\n---\nScore ONLY based on the above. Do not use prior knowledge.`
-      : `NOTE: Live page fetch failed. Score based on training knowledge of how ${siteName} typically presents "${selectedPart?.partNumber}".`;
+    // Hard stop — no training data fallback, no hallucination
+    if (!pageContent) {
+      addLog(`✗ ${siteName} — page fetch failed (blocked or unreachable)`);
+      return {
+        siteName, role, url,
+        contentSource: "blocked",
+        overallScore: null,
+        topGaps: [],
+        summary: "",
+        blocked: true,
+        fields: {}
+      };
+    }
 
     const prompt = `You are auditing product content quality for part "${selectedPart?.partNumber}" from "${manufacturer}".
 Site: ${siteName} | Role: ${role} | URL: ${url}
 ${roleNote}
 
-${contextSection}
+LIVE PAGE CONTENT (from ${url}):
+---
+${pageContent}
+---
+Score ONLY based on the above content. Do not use prior knowledge or make assumptions.
 
 SCORING RULES:
-- Score strictly based on content above. high=present+complete, medium=partial, low=missing.
+- high = present and complete in the page content above
+- medium = partially present
+- low = missing or not found in the content above
 - "topGaps" only contains keys you scored low/medium.
 - overallScore = weighted avg (high=100, medium=50, low=0).
 
-For each field: "value" (max 30 words of actual content, or "MISSING"), "score", "notes" (gap detail if not high).
+For each field: "value" (max 30 words of actual content found on page, or "MISSING"), "score", "notes".
 Fields: ${fields.map(f => f.key + ": " + f.label).join(", ")}
-Also: "overallScore", "topGaps" (up to 3), "summary" (2 sentences).
+Also: "overallScore", "topGaps" (up to 3), "summary" (2 sentences max, based only on page content).
 
 Respond ONLY with valid JSON, no markdown:
-{"siteName":"${siteName}","role":"${role}","url":"${url}","contentSource":"${contentSource}","overallScore":0,"topGaps":[],"summary":"","fields":{${fields.map(f => `"${f.key}":{"value":"","score":"low","notes":""}`).join(",")}}}`;
+{"siteName":"${siteName}","role":"${role}","url":"${url}","contentSource":"live","overallScore":0,"topGaps":[],"summary":"","fields":{${fields.map(f => `"${f.key}":{"value":"","score":"low","notes":""}`).join(",")}}}`;
 
     const raw = await callClaude([{ role: "user", content: prompt }], 3000);
     const result = parseJSON(raw);
-    result.contentSource = contentSource;
+    result.contentSource = "live";
+    result.blocked = false;
     return result;
   };
 
@@ -461,17 +477,49 @@ Respond ONLY with valid JSON, no markdown:
     </span>
   );
 
-  const SourceBadge = ({ source }) => (
-    <span className={`text-xs px-2 py-0.5 rounded font-medium ${source === "live" ? "bg-blue-100 text-blue-700" : "bg-gray-100 text-gray-500"}`}>
-      {source === "live" ? "● Live Page" : "○ Training Data"}
-    </span>
-  );
+  const SourceBadge = ({ source }) => {
+    if (source === "live")    return <span className="text-xs px-2 py-0.5 rounded font-medium bg-blue-100 text-blue-700">● Live Page</span>;
+    if (source === "blocked") return <span className="text-xs px-2 py-0.5 rounded font-medium bg-gray-200 text-gray-500">✗ Blocked</span>;
+    return null;
+  };
 
   const UrlStatusBadge = ({ status }) => {
     if (status === "resolving") return <span className="text-xs text-blue-500 animate-pulse font-medium">⏳ Finding PDP...</span>;
     if (status === "resolved")  return <span className="text-xs text-green-600 font-medium">✓ PDP Found</span>;
     if (status === "fallback")  return <span className="text-xs text-yellow-600 font-medium">⚠ No PDP found — edit manually</span>;
     return null;
+  };
+
+  const [retryUrls, setRetryUrls] = useState({});
+  const [retrying, setRetrying] = useState({});
+
+  const retryBlocked = async (key, siteName, role) => {
+    const url = retryUrls[key]?.trim();
+    if (!url) return;
+    setRetrying(r => ({ ...r, [key]: true }));
+    addLog(`→ Retrying ${siteName} with manual URL...`);
+    try {
+      const result = await auditPage(url, siteName, role);
+      if (result.blocked) {
+        addLog(`✗ ${siteName} — still blocked at manual URL`);
+      } else {
+        addLog(`✓ ${siteName} — ${result.overallScore}/100 [live page]`);
+        // Patch results in place
+        if (key === "manufacturer") {
+          setResults(r => ({ ...r, manufacturer: result }));
+        } else {
+          const idx = parseInt(key.replace("dist", "")) - 1;
+          setResults(r => {
+            const dists = [...r.distributors];
+            dists[idx] = result;
+            return { ...r, distributors: dists };
+          });
+        }
+      }
+    } catch (e) {
+      addLog(`✗ ${siteName} retry failed: ${e.message}`);
+    }
+    setRetrying(r => ({ ...r, [key]: false }));
   };
 
   const renderGapReport = () => {
@@ -496,21 +544,42 @@ Respond ONLY with valid JSON, no markdown:
           {all.map((r, i) => {
             const discData = discoverabilityData.find(d => d.name === r.siteName);
             return (
-              <div key={i} className={`p-4 rounded-lg border-2 ${i === 0 ? "border-blue-400 bg-blue-50" : "border-gray-200 bg-white"}`}>
+              <div key={i} className={`p-4 rounded-lg border-2 ${i === 0 ? "border-blue-400 bg-blue-50" : r.blocked ? "border-gray-300 bg-gray-50" : "border-gray-200 bg-white"}`}>
                 <div className="font-bold text-gray-800 text-sm">{r.siteName}</div>
                 <div className="text-xs text-gray-400 mb-1">{r.role}</div>
                 <div className="flex flex-wrap gap-1 mb-2">
                   {discData && <AgenticBadge pass={discData.pdpAddressable} />}
                   <SourceBadge source={r.contentSource} />
                 </div>
-                <div className="text-3xl font-black" style={{ color: r.overallScore >= 75 ? "#16a34a" : r.overallScore >= 50 ? "#ca8a04" : "#dc2626" }}>
-                  {r.overallScore}<span className="text-sm font-normal text-gray-400">/100</span>
-                </div>
-                <div className="text-xs text-gray-500 mt-2">{r.summary}</div>
-                {r.topGaps?.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {r.topGaps.map(g => <span key={g} className="text-xs bg-red-100 text-red-700 px-1.5 py-0.5 rounded">{g}</span>)}
+                {r.blocked ? (
+                  <div className="mt-1">
+                    <div className="text-sm font-bold text-gray-400">Unauditable</div>
+                    <div className="text-xs text-gray-400 mt-1 mb-2">Page blocked or unreachable. Paste a working URL to re-audit.</div>
+                    <input
+                      className="w-full border border-gray-300 rounded px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 mb-1"
+                      placeholder="https://..."
+                      value={retryUrls[i === 0 ? "manufacturer" : `dist${i}`] || ""}
+                      onChange={e => setRetryUrls(u => ({ ...u, [i === 0 ? "manufacturer" : `dist${i}`]: e.target.value }))}
+                    />
+                    <button
+                      onClick={() => retryBlocked(i === 0 ? "manufacturer" : `dist${i}`, r.siteName, r.role)}
+                      disabled={retrying[i === 0 ? "manufacturer" : `dist${i}`] || !retryUrls[i === 0 ? "manufacturer" : `dist${i}`]?.trim()}
+                      className="w-full text-xs bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white font-bold px-2 py-1 rounded">
+                      {retrying[i === 0 ? "manufacturer" : `dist${i}`] ? "Auditing..." : "Re-audit →"}
+                    </button>
                   </div>
+                ) : (
+                  <>
+                    <div className="text-3xl font-black" style={{ color: r.overallScore >= 75 ? "#16a34a" : r.overallScore >= 50 ? "#ca8a04" : "#dc2626" }}>
+                      {r.overallScore}<span className="text-sm font-normal text-gray-400">/100</span>
+                    </div>
+                    <div className="text-xs text-gray-500 mt-2">{r.summary}</div>
+                    {r.topGaps?.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {r.topGaps.map(g => <span key={g} className="text-xs bg-red-100 text-red-700 px-1.5 py-0.5 rounded">{g}</span>)}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             );
@@ -590,7 +659,11 @@ Respond ONLY with valid JSON, no markdown:
                 <th key={i} className="text-center p-3 min-w-32">
                   <div className="font-semibold">{r.siteName}</div>
                   <div className="text-xs opacity-70">{r.role}</div>
-                  <div className="text-lg font-bold mt-1">{r.overallScore}/100</div>
+                  {r.blocked ? (
+                    <div className="text-sm font-bold text-gray-400 mt-1">Blocked</div>
+                  ) : (
+                    <div className="text-lg font-bold mt-1">{r.overallScore}/100</div>
+                  )}
                   <div className="mt-1"><SourceBadge source={r.contentSource} /></div>
                 </th>
               ))}
@@ -841,7 +914,7 @@ Respond ONLY with valid JSON, no markdown:
                   className="text-xs bg-gray-800 hover:bg-gray-700 text-white font-bold px-4 py-2 rounded-lg">
                   Export CSV ↓
                 </button>
-                <button onClick={() => { setStep("discover"); setResults(null); setLog([]); setDiscoveredParts([]); setDiscoveredDistributors([]); setDiscoverabilityData([]); setSelectedDistributors([]); setUrls({}); setNames({}); setUrlStatus({}); }}
+                <button onClick={() => { setStep("discover"); setResults(null); setLog([]); setDiscoveredParts([]); setDiscoveredDistributors([]); setDiscoverabilityData([]); setSelectedDistributors([]); setUrls({}); setNames({}); setUrlStatus({}); setRetryUrls({}); setRetrying({}); }}
                   className="text-xs text-gray-400 hover:text-gray-600 underline">New Audit</button>
               </div>
             </div>

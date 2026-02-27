@@ -34,20 +34,26 @@ app.post("/api/search", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Jina AI page reader proxy
+// Firecrawl page reader proxy
 app.post("/api/fetch-page", async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: "url required" });
-  // Block google.com — should never reach Jina
   if (url.includes("google.com/search")) {
     return res.status(400).json({ error: "Cannot fetch Google search pages — URL was not resolved to a PDP" });
   }
+  const k = process.env.FIRECRAWL_API_KEY;
+  if (!k) return res.status(500).json({ error: "FIRECRAWL_API_KEY not set" });
   try {
-    const r = await fetch(`https://r.jina.ai/${url}`, {
-      headers: { "Accept": "text/plain", "X-Return-Format": "text", "X-Timeout": "15" }
+    const r = await fetch("https://api.firecrawl.dev/v1/scrape", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${k}` },
+      body: JSON.stringify({ url, formats: ["markdown"], onlyMainContent: true, timeout: 20000 })
     });
-    if (!r.ok) return res.status(502).json({ error: `Jina fetch failed: ${r.status}` });
-    const text = await r.text();
+    if (!r.ok) return res.status(502).json({ error: `Firecrawl fetch failed: ${r.status}` });
+    const data = await r.json();
+    if (!data.success) return res.status(502).json({ error: data.error || "Firecrawl returned success:false" });
+    const text = data.data?.markdown || "";
+    if (!text) return res.status(502).json({ error: "Firecrawl returned empty content" });
     res.json({ content: text.slice(0, 8000), truncated: text.length > 8000 });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

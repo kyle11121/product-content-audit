@@ -43,7 +43,7 @@ const DISTRIBUTOR_REGISTRY = [
   { name: "Farnell", domain: "farnell.com", pdpAddressable: false, note: "Returns search results page — not directly addressable by part number" },
 ];
 
-const buildDistributorUrl = (domain, partNumber, mfrName) => {
+const buildFallbackUrl = (domain, partNumber, mfrName) => {
   const pn = encodeURIComponent(partNumber);
   const mfr = encodeURIComponent(mfrName);
   if (domain.includes("digikey")) return `https://www.digikey.com/en/products/filter?keywords=${pn}`;
@@ -56,7 +56,7 @@ const buildDistributorUrl = (domain, partNumber, mfrName) => {
   if (domain.includes("galco")) return `https://www.galco.com/buy/${mfr}/${pn}`;
   if (domain.includes("tme")) return `https://www.tme.eu/en/katalog/?search=${pn}`;
   if (domain.includes("farnell")) return `https://www.farnell.com/search?st=${pn}`;
-  return `https://www.google.com/search?q=${pn}+${mfr}`;
+  return `https://www.google.com/search?q=${pn}+${mfr}+${domain}`;
 };
 
 const resolveManufacturerUrl = (mfr, part) => {
@@ -84,11 +84,13 @@ const resolveManufacturerUrl = (mfr, part) => {
     hubbell: `https://www.hubbell.com/hubbell/en/search?q=${pn}`,
     commscope: `https://www.commscope.com/product-type/search/?q=${pn}`,
     fluke: `https://www.fluke.com/en-us/search#q=${pn}`,
+    pip: `https://www.pipglobal.com/en/search?q=${pn}`,
+    "protective industrial": `https://www.pipglobal.com/en/search?q=${pn}`,
   };
   for (const [key, url] of Object.entries(known)) {
     if (m.includes(key)) return url;
   }
-  return `https://www.${m}.com/search?q=${encodeURIComponent(pn)}`;
+  return `https://www.${m.replace(/\s+/g, "")}.com/search?q=${encodeURIComponent(pn)}`;
 };
 
 const callClaude = async (messages, maxTokens = 2000) => {
@@ -102,6 +104,51 @@ const callClaude = async (messages, maxTokens = 2000) => {
   return data.content.filter(b => b.type === "text").map(b => b.text).join("");
 };
 
+// Search Google via SerpAPI and return top organic results
+const serpSearch = async (query) => {
+  try {
+    const res = await fetch("/api/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
+    });
+    const data = await res.json();
+    if (data.error) return [];
+    return data.results || [];
+  } catch { return []; }
+};
+
+// Use SerpAPI + Claude to find best PDP URL for a distributor
+const resolveUrlViaSerpAPI = async (partNumber, mfrName, distName, domain) => {
+  const query = `"${partNumber}" ${mfrName} site:${domain}`;
+  const results = await serpSearch(query);
+  if (!results.length) return null;
+
+  // Let Claude pick the best result
+  const prompt = `You are selecting the best product detail page URL for part number "${partNumber}" from manufacturer "${mfrName}" on ${distName} (${domain}).
+
+Here are Google search results for: ${query}
+
+${results.map((r, i) => `${i+1}. Title: ${r.title}\n   URL: ${r.url}\n   Snippet: ${r.snippet}`).join("\n\n")}
+
+Select the single best URL that:
+- Is on the ${domain} domain
+- Goes directly to a product detail page for this specific part
+- NOT a search results page, category page, or unrelated page
+
+Respond with ONLY a JSON object:
+{"url":"","reason":"","confidence":"high|medium|low"}
+
+If no result is a good PDP match, return {"url":"","reason":"no PDP found","confidence":"low"}`;
+
+  try {
+    const raw = await callClaude([{ role: "user", content: prompt }], 500);
+    const clean = raw.replace(/```json|```/g, "").trim();
+    const parsed = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1));
+    return parsed.url || null;
+  } catch { return null; }
+};
+
 const fetchPageContent = async (url) => {
   try {
     const res = await fetch("/api/fetch-page", {
@@ -112,9 +159,7 @@ const fetchPageContent = async (url) => {
     const data = await res.json();
     if (data.error) return null;
     return data.content;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 };
 
 const parseJSON = (text) => {
@@ -139,7 +184,6 @@ const parseJSON = (text) => {
 
 const exportCSV = (results, partNumber, manufacturer, category, discoverabilityData) => {
   const all = [results.manufacturer, ...results.distributors];
-  const fields = FIELD_DEFINITIONS;
   const rows = [
     [`Part: ${partNumber}`, `Manufacturer: ${manufacturer}`, `Category: ${category}`, `Date: ${new Date().toLocaleDateString()}`],
     [],
@@ -150,11 +194,11 @@ const exportCSV = (results, partNumber, manufacturer, category, discoverabilityD
     ["=== CONTENT QUALITY SCORES ==="],
     ["", ...all.map(r => r.siteName)],
     ["Overall Score", ...all.map(r => `${r.overallScore}/100`)],
-    ["Page Content Source", ...all.map(r => r.contentSource === "live" ? "Live page (Jina AI)" : "Claude training data")],
+    ["Content Source", ...all.map(r => r.contentSource === "live" ? "Live page" : "Training data")],
     ["Summary", ...all.map(r => `"${r.summary.replace(/"/g, '""')}"`),],
     [],
     ["Field", ...all.map(r => `${r.siteName} Score`), ...all.map(r => `${r.siteName} Value`)],
-    ...fields.map(f => [
+    ...FIELD_DEFINITIONS.map(f => [
       f.label,
       ...all.map(r => r.fields?.[f.key]?.score?.toUpperCase() || "N/A"),
       ...all.map(r => `"${(r.fields?.[f.key]?.value || "MISSING").replace(/"/g, '""')}"`)
@@ -181,6 +225,7 @@ export default function App() {
   const [selectedDistributors, setSelectedDistributors] = useState([]);
   const [urls, setUrls] = useState({});
   const [names, setNames] = useState({});
+  const [urlStatus, setUrlStatus] = useState({}); // "resolving" | "resolved" | "fallback"
   const [results, setResults] = useState(null);
   const [activeTab, setActiveTab] = useState("gaps");
   const [log, setLog] = useState([]);
@@ -200,9 +245,9 @@ export default function App() {
 
 Identify the top 5 best-selling or most widely distributed parts from manufacturer "${manufacturer}" in the category "${category}".
 
-Criteria: high distributor catalog breadth, industry-standard, high volume, broad cross-references. Prefer parts you are highly confident exist and are widely stocked.
+Criteria: high distributor catalog breadth, industry-standard, high volume. Prefer parts you are highly confident exist and are widely stocked.
 
-Do not construct any URLs — leave manufacturerUrl as empty string.
+Leave manufacturerUrl as empty string.
 
 Respond with ONLY a raw JSON array, no markdown:
 [{"partNumber":"","name":"","confidence":"high|medium|low","reason":"","manufacturerUrl":""}]` }]);
@@ -210,9 +255,9 @@ Respond with ONLY a raw JSON array, no markdown:
       addLog("Discovering top 10 distributors...");
       const distRaw = await callClaude([{ role: "user", content: `You are a B2B distribution channel expert.
 
-Identify the top 10 distributors for manufacturer "${manufacturer}" in the category "${category}". Include both broadline and specialty distributors. Rank by channel importance.
+Identify the top 10 distributors for manufacturer "${manufacturer}" in the category "${category}". Include broadline and specialty distributors. Rank by channel importance.
 
-For the domain field use base domain only: e.g. "digikey.com", "mouser.com", "arrow.com", "newark.com", "rs-online.com", "grainger.com", "alliedelec.com", "galco.com", "tme.eu", "farnell.com"
+Use base domain only for domain field: e.g. "digikey.com", "mouser.com", "arrow.com", "newark.com", "rs-online.com", "grainger.com", "alliedelec.com", "galco.com", "tme.eu", "farnell.com", "fastenal.com", "uline.com", "mcmaster.com", "mscdirect.com"
 
 Respond with ONLY a raw JSON array, no markdown:
 [{"name":"","domain":"","confidence":"high|medium|low","relationship":"authorized|broad-catalog|regional","verticalFit":"","rank":1}]` }]);
@@ -233,7 +278,7 @@ Respond with ONLY a raw JSON array, no markdown:
       const registry = DISTRIBUTOR_REGISTRY.find(r => dist.domain?.includes(r.domain.split(".")[0]));
       const pdpAddressable = registry ? registry.pdpAddressable : false;
       const note = registry ? registry.note : "URL pattern unknown — defaults to search page";
-      return { ...dist, pdpAddressable, note, url: buildDistributorUrl(dist.domain, part.partNumber, manufacturer) };
+      return { ...dist, pdpAddressable, note, url: buildFallbackUrl(dist.domain, part.partNumber, manufacturer) };
     });
     setDiscoverabilityData(data);
     setSelectedDistributors([]);
@@ -250,50 +295,76 @@ Respond with ONLY a raw JSON array, no markdown:
     setError("");
   };
 
-  const confirmDistributors = () => {
+  const confirmDistributors = async () => {
     if (selectedDistributors.length !== 5) { setError("Select exactly 5 distributors to audit."); return; }
     setError("");
+
+    // Build initial URL map with fallbacks
     const urlMap = { manufacturer: resolveManufacturerUrl(manufacturer, selectedPart) };
     const nameMap = { manufacturer };
+    const statusMap = { manufacturer: "resolved" };
     selectedDistributors.forEach((d, i) => {
       urlMap[`dist${i+1}`] = d.url;
       nameMap[`dist${i+1}`] = d.name;
+      statusMap[`dist${i+1}`] = "resolving";
     });
     setUrls(urlMap);
     setNames(nameMap);
+    setUrlStatus(statusMap);
     setStep("configure");
+
+    // Also resolve manufacturer URL via SerpAPI if it looks like a search/fallback
+    const mfrUrl = urlMap.manufacturer;
+    if (mfrUrl.includes("search") || mfrUrl.includes("google.com")) {
+      const mfrDomain = manufacturer.toLowerCase().replace(/\s+/g, "") + ".com";
+      const resolved = await resolveUrlViaSerpAPI(selectedPart.partNumber, manufacturer, manufacturer, mfrDomain);
+      if (resolved) {
+        setUrls(u => ({ ...u, manufacturer: resolved }));
+        setUrlStatus(s => ({ ...s, manufacturer: "resolved" }));
+      }
+    }
+
+    // Resolve each distributor URL via SerpAPI in parallel
+    await Promise.all(selectedDistributors.map(async (d, i) => {
+      const key = `dist${i+1}`;
+      const resolved = await resolveUrlViaSerpAPI(selectedPart.partNumber, manufacturer, d.name, d.domain);
+      if (resolved) {
+        setUrls(u => ({ ...u, [key]: resolved }));
+        setUrlStatus(s => ({ ...s, [key]: "resolved" }));
+      } else {
+        setUrlStatus(s => ({ ...s, [key]: "fallback" }));
+      }
+    }));
   };
 
-  const auditPage = async (url, siteName, role, addLog) => {
+  const auditPage = async (url, siteName, role) => {
     const fields = role === "manufacturer" ? SHARED_FIELDS : FIELD_DEFINITIONS;
     const roleNote = role === "manufacturer"
       ? "This is the MANUFACTURER site — source of truth. Do NOT evaluate pricing or availability."
       : "This is a DISTRIBUTOR site — evaluate ALL fields including price and availability.";
 
-    // Fetch live page content via Jina
-    addLog(`    Fetching live page content for ${siteName}...`);
+    addLog(`    Fetching live content for ${siteName}...`);
     const pageContent = await fetchPageContent(url);
     const contentSource = pageContent ? "live" : "training";
 
     const contextSection = pageContent
-      ? `LIVE PAGE CONTENT (fetched from ${url}):\n---\n${pageContent}\n---\nScore ONLY based on the above live content. Do not use prior knowledge.`
-      : `NOTE: Live page fetch failed. Score based on your training knowledge of how ${siteName} typically presents part "${selectedPart?.partNumber}". Mark contentSource as "training".`;
+      ? `LIVE PAGE CONTENT (from ${url}):\n---\n${pageContent}\n---\nScore ONLY based on the above. Do not use prior knowledge.`
+      : `NOTE: Live page fetch failed. Score based on training knowledge of how ${siteName} typically presents "${selectedPart?.partNumber}".`;
 
-    const prompt = `You are auditing product content quality for part number "${selectedPart?.partNumber}" from manufacturer "${manufacturer}".
+    const prompt = `You are auditing product content quality for part "${selectedPart?.partNumber}" from "${manufacturer}".
 Site: ${siteName} | Role: ${role} | URL: ${url}
 ${roleNote}
 
 ${contextSection}
 
 SCORING RULES:
-- Score each field strictly based on what is present in the content above.
-- "high" = field is present, complete, and accurate. "medium" = partially present or incomplete. "low" = missing or inadequate.
-- "topGaps" must only contain field keys you scored "low" or "medium".
-- overallScore = weighted average across fields (high=100, medium=50, low=0).
-- If this is a search results page rather than a PDP, score only what's visible for the matching product listing.
+- Score strictly based on content above. high=present+complete, medium=partial, low=missing.
+- "topGaps" only contains keys you scored low/medium.
+- overallScore = weighted avg (high=100, medium=50, low=0).
 
-For each field: "value" (max 30 words of actual content found, or "MISSING"), "score" ("high"/"medium"/"low"), "notes" (specific gap note if not high, else "").
+For each field: "value" (max 30 words of actual content, or "MISSING"), "score", "notes" (gap detail if not high).
 Fields: ${fields.map(f => f.key + ": " + f.label).join(", ")}
+Also: "overallScore", "topGaps" (up to 3), "summary" (2 sentences).
 
 Respond ONLY with valid JSON, no markdown:
 {"siteName":"${siteName}","role":"${role}","url":"${url}","contentSource":"${contentSource}","overallScore":0,"topGaps":[],"summary":"","fields":{${fields.map(f => `"${f.key}":{"value":"","score":"low","notes":""}`).join(",")}}}`;
@@ -310,17 +381,13 @@ Respond ONLY with valid JSON, no markdown:
     setError(""); setLoading(true); setLog([]); setResults(null); setStep("audit");
     try {
       const all = [];
-      addLog(`→ Auditing ${names.manufacturer}...`);
-      const mfrResult = await auditPage(urls.manufacturer, names.manufacturer, "manufacturer", addLog);
-      all.push(mfrResult);
-      addLog(`✓ ${names.manufacturer} — ${mfrResult.overallScore}/100 [${mfrResult.contentSource === "live" ? "live page" : "training data"}]`);
-
-      for (let i = 1; i <= selectedDistributors.length; i++) {
-        const key = `dist${i}`;
-        addLog(`→ Auditing ${names[key]}...`);
-        const result = await auditPage(urls[key], names[key], "distributor", addLog);
+      for (const [i, key] of keys.entries()) {
+        const siteName = names[key];
+        const role = key === "manufacturer" ? "manufacturer" : "distributor";
+        addLog(`→ Auditing ${siteName}...`);
+        const result = await auditPage(urls[key], siteName, role);
         all.push(result);
-        addLog(`✓ ${names[key]} — ${result.overallScore}/100 [${result.contentSource === "live" ? "live page" : "training data"}]`);
+        addLog(`✓ ${siteName} — ${result.overallScore}/100 [${result.contentSource === "live" ? "live page" : "training data"}]`);
       }
       setResults({ manufacturer: all[0], distributors: all.slice(1) });
       setStep("results");
@@ -353,14 +420,20 @@ Respond ONLY with valid JSON, no markdown:
     </span>
   );
 
+  const UrlStatusBadge = ({ status }) => {
+    if (status === "resolving") return <span className="text-xs text-blue-500 animate-pulse font-medium">⏳ Finding PDP...</span>;
+    if (status === "resolved") return <span className="text-xs text-green-600 font-medium">✓ PDP Found</span>;
+    if (status === "fallback") return <span className="text-xs text-yellow-600 font-medium">⚠ No PDP found — edit manually</span>;
+    return null;
+  };
+
   const renderGapReport = () => {
     if (!results) return null;
     const mfr = results.manufacturer;
     const dists = results.distributors;
     const gapsByField = {};
     SHARED_FIELDS.forEach(f => {
-      const ms = mfr.fields?.[f.key]?.score;
-      if (ms !== "high") return;
+      if (mfr.fields?.[f.key]?.score !== "high") return;
       dists.forEach(d => {
         const ds = d.fields?.[f.key]?.score;
         if (ds === "low" || ds === "medium") {
@@ -396,7 +469,6 @@ Respond ONLY with valid JSON, no markdown:
             );
           })}
         </div>
-
         {Object.keys(gapsByField).length > 0 && (
           <div>
             <h3 className="font-bold text-gray-800 mb-2">Content Drift — Manufacturer Has It, Distributors Don't</h3>
@@ -417,7 +489,7 @@ Respond ONLY with valid JSON, no markdown:
         )}
         {Object.keys(gapsByField).length === 0 && (
           <div className="bg-green-50 border border-green-200 rounded p-4 text-green-800 text-sm font-medium">
-            ✓ No content drift detected — distributors are keeping up with manufacturer content.
+            ✓ No content drift detected.
           </div>
         )}
       </div>
@@ -441,7 +513,7 @@ Respond ONLY with valid JSON, no markdown:
             <div className={`text-xs font-medium ${d.pdpAddressable ? "text-green-700" : "text-red-700"}`}>{d.note}</div>
             {!d.pdpAddressable && (
               <div className="mt-2 text-xs text-red-600 bg-red-100 rounded p-2">
-                ⚠ When an AI agent queries "{selectedPart?.partNumber}" on {d.name}, it receives a search results page. The agent cannot reliably extract product specifications, pricing, or availability — your part is functionally invisible.
+                ⚠ When an AI agent queries "{selectedPart?.partNumber}" on {d.name}, it receives a search results page. The agent cannot reliably extract product specifications, pricing, or availability.
               </div>
             )}
           </div>
@@ -452,7 +524,7 @@ Respond ONLY with valid JSON, no markdown:
           {discoverabilityData.filter(d => !d.pdpAddressable).length} of {discoverabilityData.length} distributors fail agentic discoverability
         </div>
         <div className="text-sm text-orange-800">
-          As AI-powered procurement accelerates, parts that aren't directly addressable by part number will be systematically excluded from agentic sourcing workflows — regardless of content quality on the underlying page.
+          As AI-powered procurement accelerates, parts that aren't directly addressable by part number will be systematically excluded from agentic sourcing workflows — regardless of content quality on the page.
         </div>
       </div>
     </div>
@@ -597,7 +669,7 @@ Respond ONLY with valid JSON, no markdown:
             <div className="flex items-center justify-between mb-2">
               <div>
                 <h2 className="font-black text-gray-900 text-lg">Step 3 — Agentic Discoverability</h2>
-                <p className="text-sm text-gray-500">Which distributors are visible to AI agents? Select 5 to audit for content quality.</p>
+                <p className="text-sm text-gray-500">Which distributors are visible to AI agents? Select 5 to audit.</p>
               </div>
               <button onClick={() => setStep("select")} className="text-xs text-gray-400 hover:text-gray-600 underline">← Back</button>
             </div>
@@ -607,7 +679,7 @@ Respond ONLY with valid JSON, no markdown:
               <div className="text-sm text-blue-700">{selectedPart?.name}</div>
             </div>
             <div className="bg-gray-900 text-white rounded-lg p-4 mb-4 text-sm">
-              <span className="font-bold">Agentic discoverability:</span> AI procurement agents query part numbers directly via URL. Distributors that return search pages instead of product pages are <span className="text-red-400 font-bold">invisible to AI</span> — your parts cannot be found, specified, or purchased through agentic workflows.
+              <span className="font-bold">Agentic discoverability:</span> AI procurement agents query part numbers directly via URL. Distributors that return search pages are <span className="text-red-400 font-bold">invisible to AI</span> — parts cannot be found or purchased through agentic workflows.
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
               {discoverabilityData.map((d, i) => {
@@ -644,7 +716,7 @@ Respond ONLY with valid JSON, no markdown:
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h2 className="font-black text-gray-900 text-lg">Step 4 — Confirm URLs</h2>
-                <p className="text-sm text-gray-500">Open each link to verify it's a product page. Paste the correct URL if not.</p>
+                <p className="text-sm text-gray-500">URLs are being resolved via Google search. Open each to verify, paste corrections if needed.</p>
               </div>
               <button onClick={() => setStep("discoverability")} className="text-xs text-gray-400 hover:text-gray-600 underline">← Back</button>
             </div>
@@ -658,8 +730,11 @@ Respond ONLY with valid JSON, no markdown:
                 { key: "manufacturer", label: "Manufacturer", icon: "📌", accent: true },
                 ...selectedDistributors.map((d, i) => ({ key: `dist${i+1}`, label: `Distributor ${i+1}`, icon: "🏪", accent: false }))
               ].map(({ key, label, icon, accent }) => (
-                <div key={key} className={`border rounded-lg p-3 ${accent ? "border-blue-200 bg-blue-50" : "border-gray-100 bg-gray-50"}`}>
-                  <div className={`text-xs font-bold uppercase tracking-wide mb-2 ${accent ? "text-blue-600" : "text-gray-500"}`}>{icon} {label}</div>
+                <div key={key} className={`border rounded-lg p-3 ${accent ? "border-blue-200 bg-blue-50" : urlStatus[key] === "fallback" ? "border-yellow-200 bg-yellow-50" : "border-gray-100 bg-gray-50"}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <div className={`text-xs font-bold uppercase tracking-wide ${accent ? "text-blue-600" : "text-gray-500"}`}>{icon} {label}</div>
+                    <UrlStatusBadge status={urlStatus[key]} />
+                  </div>
                   <input className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mb-2 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
                     placeholder="Display name" value={names[key] || ""} onChange={e => setNames(n => ({ ...n, [key]: e.target.value }))} />
                   <div className="flex gap-2 items-center">
@@ -677,9 +752,9 @@ Respond ONLY with valid JSON, no markdown:
               ))}
             </div>
             {error && <div className="text-red-600 text-sm mb-3">{error}</div>}
-            <button onClick={runAudit} disabled={loading}
+            <button onClick={runAudit} disabled={loading || Object.values(urlStatus).some(s => s === "resolving")}
               className="bg-green-600 hover:bg-green-700 disabled:bg-green-300 text-white font-bold px-6 py-2.5 rounded-lg text-sm">
-              Run Content Audit →
+              {Object.values(urlStatus).some(s => s === "resolving") ? "Resolving URLs..." : "Run Content Audit →"}
             </button>
           </div>
         )}
@@ -687,7 +762,7 @@ Respond ONLY with valid JSON, no markdown:
         {step === "audit" && (
           <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
             <div className="font-semibold text-gray-700 mb-1">Auditing {selectedPart?.partNumber}</div>
-            <div className="text-gray-400 text-sm mb-4">Fetching live page content + scoring manufacturer + {selectedDistributors.map(d => d.name).join(", ")}...</div>
+            <div className="text-gray-400 text-sm mb-4">Fetching live pages + scoring manufacturer + {selectedDistributors.map(d => d.name).join(", ")}...</div>
             <div className="flex justify-center gap-1 mb-4">{[0,1,2,3].map(i => (
               <div key={i} className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
             ))}</div>
@@ -710,14 +785,14 @@ Respond ONLY with valid JSON, no markdown:
                   className="text-xs bg-gray-800 hover:bg-gray-700 text-white font-bold px-4 py-2 rounded-lg">
                   Export CSV ↓
                 </button>
-                <button onClick={() => { setStep("discover"); setResults(null); setLog([]); setDiscoveredParts([]); setDiscoveredDistributors([]); setDiscoverabilityData([]); setSelectedDistributors([]); }}
+                <button onClick={() => { setStep("discover"); setResults(null); setLog([]); setDiscoveredParts([]); setDiscoveredDistributors([]); setDiscoverabilityData([]); setSelectedDistributors([]); setUrls({}); setNames({}); setUrlStatus({}); }}
                   className="text-xs text-gray-400 hover:text-gray-600 underline">New Audit</button>
               </div>
             </div>
-            <div className="flex border-b border-gray-200">
+            <div className="flex border-b border-gray-200 overflow-x-auto">
               {[{ id: "gaps", label: "Gap Report" }, { id: "matrix", label: "Full Matrix" }, { id: "agentic", label: "Agentic Discoverability" }].map(t => (
                 <button key={t.id} onClick={() => setActiveTab(t.id)}
-                  className={`px-6 py-3 text-sm font-semibold transition-colors ${activeTab === t.id ? "border-b-2 border-blue-600 text-blue-600" : "text-gray-500 hover:text-gray-700"}`}>
+                  className={`px-6 py-3 text-sm font-semibold whitespace-nowrap transition-colors ${activeTab === t.id ? "border-b-2 border-blue-600 text-blue-600" : "text-gray-500 hover:text-gray-700"}`}>
                   {t.label}
                 </button>
               ))}

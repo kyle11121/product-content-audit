@@ -30,7 +30,6 @@ const SCORE_COLORS = {
   low: "bg-red-100 text-red-800 border-red-200",
 };
 
-// Distributor PDP addressability — can we construct a direct PDP URL from a part number alone?
 const DISTRIBUTOR_REGISTRY = [
   { name: "Digi-Key", domain: "digikey.com", pdpAddressable: true, note: "Direct PDP URL constructable from part number" },
   { name: "Arrow Electronics", domain: "arrow.com", pdpAddressable: true, note: "Direct PDP URL constructable from part number" },
@@ -92,15 +91,30 @@ const resolveManufacturerUrl = (mfr, part) => {
   return `https://www.${m}.com/search?q=${encodeURIComponent(pn)}`;
 };
 
-const callClaude = async (messages) => {
+const callClaude = async (messages, maxTokens = 2000) => {
   const res = await fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 2000, messages }),
+    body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: maxTokens, messages }),
   });
   const data = await res.json();
   if (data.error) throw new Error(typeof data.error === "object" ? JSON.stringify(data.error) : data.error);
   return data.content.filter(b => b.type === "text").map(b => b.text).join("");
+};
+
+const fetchPageContent = async (url) => {
+  try {
+    const res = await fetch("/api/fetch-page", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const data = await res.json();
+    if (data.error) return null;
+    return data.content;
+  } catch {
+    return null;
+  }
 };
 
 const parseJSON = (text) => {
@@ -136,6 +150,7 @@ const exportCSV = (results, partNumber, manufacturer, category, discoverabilityD
     ["=== CONTENT QUALITY SCORES ==="],
     ["", ...all.map(r => r.siteName)],
     ["Overall Score", ...all.map(r => `${r.overallScore}/100`)],
+    ["Page Content Source", ...all.map(r => r.contentSource === "live" ? "Live page (Jina AI)" : "Claude training data")],
     ["Summary", ...all.map(r => `"${r.summary.replace(/"/g, '""')}"`),],
     [],
     ["Field", ...all.map(r => `${r.siteName} Score`), ...all.map(r => `${r.siteName} Value`)],
@@ -160,10 +175,10 @@ export default function App() {
   const [manufacturer, setManufacturer] = useState("");
   const [category, setCategory] = useState("");
   const [discoveredParts, setDiscoveredParts] = useState([]);
-  const [discoveredDistributors, setDiscoveredDistributors] = useState([]); // top 10 from Claude
-  const [discoverabilityData, setDiscoverabilityData] = useState([]); // 10 with pass/fail
+  const [discoveredDistributors, setDiscoveredDistributors] = useState([]);
+  const [discoverabilityData, setDiscoverabilityData] = useState([]);
   const [selectedPart, setSelectedPart] = useState(null);
-  const [selectedDistributors, setSelectedDistributors] = useState([]); // 5 chosen for audit
+  const [selectedDistributors, setSelectedDistributors] = useState([]);
   const [urls, setUrls] = useState({});
   const [names, setNames] = useState({});
   const [results, setResults] = useState(null);
@@ -185,9 +200,9 @@ export default function App() {
 
 Identify the top 5 best-selling or most widely distributed parts from manufacturer "${manufacturer}" in the category "${category}".
 
-Criteria: high distributor catalog breadth, industry-standard, high volume, broad cross-references.
+Criteria: high distributor catalog breadth, industry-standard, high volume, broad cross-references. Prefer parts you are highly confident exist and are widely stocked.
 
-Do not construct any URLs — leave all URL fields as empty string.
+Do not construct any URLs — leave manufacturerUrl as empty string.
 
 Respond with ONLY a raw JSON array, no markdown:
 [{"partNumber":"","name":"","confidence":"high|medium|low","reason":"","manufacturerUrl":""}]` }]);
@@ -214,20 +229,25 @@ Respond with ONLY a raw JSON array, no markdown:
 
   const selectPart = (part) => {
     setSelectedPart(part);
-    // Build discoverability data for all 10 distributors
     const data = discoveredDistributors.map(dist => {
       const registry = DISTRIBUTOR_REGISTRY.find(r => dist.domain?.includes(r.domain.split(".")[0]));
       const pdpAddressable = registry ? registry.pdpAddressable : false;
       const note = registry ? registry.note : "URL pattern unknown — defaults to search page";
-      return {
-        ...dist,
-        pdpAddressable,
-        note,
-        url: buildDistributorUrl(dist.domain, part.partNumber, manufacturer),
-      };
+      return { ...dist, pdpAddressable, note, url: buildDistributorUrl(dist.domain, part.partNumber, manufacturer) };
     });
     setDiscoverabilityData(data);
+    setSelectedDistributors([]);
     setStep("discoverability");
+  };
+
+  const toggleDistributor = (dist) => {
+    setSelectedDistributors(prev => {
+      const exists = prev.find(d => d.name === dist.name);
+      if (exists) return prev.filter(d => d.name !== dist.name);
+      if (prev.length >= 5) return prev;
+      return [...prev, dist];
+    });
+    setError("");
   };
 
   const confirmDistributors = () => {
@@ -244,39 +264,44 @@ Respond with ONLY a raw JSON array, no markdown:
     setStep("configure");
   };
 
-  const toggleDistributor = (dist) => {
-    setSelectedDistributors(prev => {
-      const exists = prev.find(d => d.name === dist.name);
-      if (exists) return prev.filter(d => d.name !== dist.name);
-      if (prev.length >= 5) return prev;
-      return [...prev, dist];
-    });
-    setError("");
-  };
-
-  const auditPage = async (url, siteName, role) => {
+  const auditPage = async (url, siteName, role, addLog) => {
     const fields = role === "manufacturer" ? SHARED_FIELDS : FIELD_DEFINITIONS;
     const roleNote = role === "manufacturer"
       ? "This is the MANUFACTURER site — source of truth. Do NOT evaluate pricing or availability."
       : "This is a DISTRIBUTOR site — evaluate ALL fields including price and availability.";
+
+    // Fetch live page content via Jina
+    addLog(`    Fetching live page content for ${siteName}...`);
+    const pageContent = await fetchPageContent(url);
+    const contentSource = pageContent ? "live" : "training";
+
+    const contextSection = pageContent
+      ? `LIVE PAGE CONTENT (fetched from ${url}):\n---\n${pageContent}\n---\nScore ONLY based on the above live content. Do not use prior knowledge.`
+      : `NOTE: Live page fetch failed. Score based on your training knowledge of how ${siteName} typically presents part "${selectedPart?.partNumber}". Mark contentSource as "training".`;
+
     const prompt = `You are auditing product content quality for part number "${selectedPart?.partNumber}" from manufacturer "${manufacturer}".
 Site: ${siteName} | Role: ${role} | URL: ${url}
 ${roleNote}
 
-SCORING RULES:
-- Score based on your knowledge of how ${siteName} presents part "${selectedPart?.partNumber}".
-- Never return overallScore of 0 unless the site genuinely has no content for this part.
-- "topGaps" must only contain field keys where YOU scored that field "low" or "medium".
-- overallScore = weighted average: high=100, medium=50, low=0.
+${contextSection}
 
-For each field: "value" (max 30 words or "MISSING"), "score" ("high"/"medium"/"low"), "notes" (gap note if not high, else "").
+SCORING RULES:
+- Score each field strictly based on what is present in the content above.
+- "high" = field is present, complete, and accurate. "medium" = partially present or incomplete. "low" = missing or inadequate.
+- "topGaps" must only contain field keys you scored "low" or "medium".
+- overallScore = weighted average across fields (high=100, medium=50, low=0).
+- If this is a search results page rather than a PDP, score only what's visible for the matching product listing.
+
+For each field: "value" (max 30 words of actual content found, or "MISSING"), "score" ("high"/"medium"/"low"), "notes" (specific gap note if not high, else "").
 Fields: ${fields.map(f => f.key + ": " + f.label).join(", ")}
-Also: "overallScore" (0-100), "topGaps" (up to 3 field keys), "summary" (2 sentences).
 
 Respond ONLY with valid JSON, no markdown:
-{"siteName":"${siteName}","role":"${role}","url":"${url}","overallScore":0,"topGaps":[],"summary":"","fields":{${fields.map(f => `"${f.key}":{"value":"","score":"low","notes":""}`).join(",")}}}`;
-    const raw = await callClaude([{ role: "user", content: prompt }]);
-    return parseJSON(raw);
+{"siteName":"${siteName}","role":"${role}","url":"${url}","contentSource":"${contentSource}","overallScore":0,"topGaps":[],"summary":"","fields":{${fields.map(f => `"${f.key}":{"value":"","score":"low","notes":""}`).join(",")}}}`;
+
+    const raw = await callClaude([{ role: "user", content: prompt }], 3000);
+    const result = parseJSON(raw);
+    result.contentSource = contentSource;
+    return result;
   };
 
   const runAudit = async () => {
@@ -285,15 +310,17 @@ Respond ONLY with valid JSON, no markdown:
     setError(""); setLoading(true); setLog([]); setResults(null); setStep("audit");
     try {
       const all = [];
-      addLog(`  → Auditing ${names.manufacturer}...`);
-      const mfrResult = await auditPage(urls.manufacturer, names.manufacturer, "manufacturer");
+      addLog(`→ Auditing ${names.manufacturer}...`);
+      const mfrResult = await auditPage(urls.manufacturer, names.manufacturer, "manufacturer", addLog);
       all.push(mfrResult);
-      addLog(`  ✓ ${names.manufacturer} — ${mfrResult.overallScore}/100`);
+      addLog(`✓ ${names.manufacturer} — ${mfrResult.overallScore}/100 [${mfrResult.contentSource === "live" ? "live page" : "training data"}]`);
+
       for (let i = 1; i <= selectedDistributors.length; i++) {
-        addLog(`  → Auditing ${names[`dist${i}`]}...`);
-        const result = await auditPage(urls[`dist${i}`], names[`dist${i}`], "distributor");
+        const key = `dist${i}`;
+        addLog(`→ Auditing ${names[key]}...`);
+        const result = await auditPage(urls[key], names[key], "distributor", addLog);
         all.push(result);
-        addLog(`  ✓ ${names[`dist${i}`]} — ${result.overallScore}/100`);
+        addLog(`✓ ${names[key]} — ${result.overallScore}/100 [${result.contentSource === "live" ? "live page" : "training data"}]`);
       }
       setResults({ manufacturer: all[0], distributors: all.slice(1) });
       setStep("results");
@@ -317,6 +344,12 @@ Respond ONLY with valid JSON, no markdown:
   const AgenticBadge = ({ pass }) => (
     <span className={`text-xs px-2 py-0.5 rounded font-bold border ${pass ? "bg-green-100 text-green-700 border-green-200" : "bg-red-100 text-red-700 border-red-200"}`}>
       {pass ? "✓ AI-Visible" : "✗ AI-Invisible"}
+    </span>
+  );
+
+  const SourceBadge = ({ source }) => (
+    <span className={`text-xs px-2 py-0.5 rounded font-medium ${source === "live" ? "bg-blue-100 text-blue-700" : "bg-gray-100 text-gray-500"}`}>
+      {source === "live" ? "● Live Page" : "○ Training Data"}
     </span>
   );
 
@@ -346,7 +379,10 @@ Respond ONLY with valid JSON, no markdown:
               <div key={i} className={`p-4 rounded-lg border-2 ${i === 0 ? "border-blue-400 bg-blue-50" : "border-gray-200 bg-white"}`}>
                 <div className="font-bold text-gray-800 text-sm">{r.siteName}</div>
                 <div className="text-xs text-gray-400 mb-1">{r.role}</div>
-                {discData && <div className="mb-2"><AgenticBadge pass={discData.pdpAddressable} /></div>}
+                <div className="flex flex-wrap gap-1 mb-2">
+                  {discData && <AgenticBadge pass={discData.pdpAddressable} />}
+                  <SourceBadge source={r.contentSource} />
+                </div>
                 <div className="text-3xl font-black" style={{ color: r.overallScore >= 75 ? "#16a34a" : r.overallScore >= 50 ? "#ca8a04" : "#dc2626" }}>
                   {r.overallScore}<span className="text-sm font-normal text-gray-400">/100</span>
                 </div>
@@ -360,6 +396,7 @@ Respond ONLY with valid JSON, no markdown:
             );
           })}
         </div>
+
         {Object.keys(gapsByField).length > 0 && (
           <div>
             <h3 className="font-bold text-gray-800 mb-2">Content Drift — Manufacturer Has It, Distributors Don't</h3>
@@ -391,7 +428,7 @@ Respond ONLY with valid JSON, no markdown:
     <div className="space-y-4">
       <div className="bg-gray-900 rounded-xl p-5 text-white mb-4">
         <h3 className="font-black text-lg mb-1">Agentic Search Discoverability</h3>
-        <p className="text-gray-400 text-sm">AI agents and procurement bots query part numbers directly. Distributors that return search pages instead of product pages are effectively invisible to agentic search — meaning your parts can't be found, specified, or purchased through AI-powered workflows.</p>
+        <p className="text-gray-400 text-sm">AI agents and procurement bots query part numbers directly via URL. Distributors that return search pages instead of product pages are effectively invisible to agentic search — meaning your parts can't be found, specified, or purchased through AI-powered workflows.</p>
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {discoverabilityData.map((d, i) => (
@@ -400,7 +437,7 @@ Respond ONLY with valid JSON, no markdown:
               <span className="font-bold text-gray-900">{d.name}</span>
               <AgenticBadge pass={d.pdpAddressable} />
             </div>
-            <div className="text-xs text-gray-600 mb-1">{d.domain}</div>
+            <div className="text-xs text-gray-500 mb-1">{d.domain} · <span className="capitalize">{d.relationship}</span></div>
             <div className={`text-xs font-medium ${d.pdpAddressable ? "text-green-700" : "text-red-700"}`}>{d.note}</div>
             {!d.pdpAddressable && (
               <div className="mt-2 text-xs text-red-600 bg-red-100 rounded p-2">
@@ -435,6 +472,7 @@ Respond ONLY with valid JSON, no markdown:
                   <div className="font-semibold">{r.siteName}</div>
                   <div className="text-xs opacity-70">{r.role}</div>
                   <div className="text-lg font-bold mt-1">{r.overallScore}/100</div>
+                  <div className="mt-1"><SourceBadge source={r.contentSource} /></div>
                 </th>
               ))}
             </tr>
@@ -483,7 +521,7 @@ Respond ONLY with valid JSON, no markdown:
       <div className="max-w-7xl mx-auto px-4 py-8">
         <div className="mb-6">
           <h1 className="text-2xl font-black text-gray-900">Product Content Audit</h1>
-          <p className="text-sm text-gray-500 mt-1">Discover top parts + distributors → audit content quality + agentic discoverability</p>
+          <p className="text-sm text-gray-500 mt-1">Discover top parts + distributors → audit live content quality + agentic discoverability</p>
           <div className="flex gap-2 mt-3 flex-wrap">
             {["Discover", "Select", "Discoverability", "URLs", "Audit", "Results"].map((label, i) => (
               <div key={label} className="flex items-center gap-1">
@@ -555,52 +593,48 @@ Respond ONLY with valid JSON, no markdown:
         )}
 
         {step === "discoverability" && (
-          <div className="space-y-4">
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-              <div className="flex items-center justify-between mb-2">
-                <div>
-                  <h2 className="font-black text-gray-900 text-lg">Step 3 — Agentic Discoverability</h2>
-                  <p className="text-sm text-gray-500">Which distributors are visible to AI agents? Select 5 to audit for content quality.</p>
-                </div>
-                <button onClick={() => setStep("select")} className="text-xs text-gray-400 hover:text-gray-600 underline">← Back</button>
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+            <div className="flex items-center justify-between mb-2">
+              <div>
+                <h2 className="font-black text-gray-900 text-lg">Step 3 — Agentic Discoverability</h2>
+                <p className="text-sm text-gray-500">Which distributors are visible to AI agents? Select 5 to audit for content quality.</p>
               </div>
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
-                <div className="text-xs text-blue-500 font-bold uppercase tracking-wide">Selected Part</div>
-                <div className="font-black text-blue-900">{selectedPart?.partNumber}</div>
-                <div className="text-sm text-blue-700">{selectedPart?.name}</div>
-              </div>
-              <div className="bg-gray-900 text-white rounded-lg p-4 mb-4 text-sm">
-                <span className="font-bold">What is agentic discoverability?</span> AI procurement agents query part numbers directly via URL. Distributors that return search pages instead of product pages are <span className="text-red-400 font-bold">invisible to AI</span> — your parts cannot be found, specified, or purchased through agentic workflows.
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
-                {discoverabilityData.map((d, i) => {
-                  const isSelected = selectedDistributors.find(s => s.name === d.name);
-                  return (
-                    <div key={i}
-                      onClick={() => toggleDistributor(d)}
-                      className={`rounded-lg border-2 p-4 cursor-pointer transition-all ${isSelected ? "border-blue-500 bg-blue-50" : d.pdpAddressable ? "border-green-200 bg-green-50 hover:border-green-400" : "border-red-200 bg-red-50 hover:border-red-400"}`}>
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="flex items-center gap-2">
-                          {isSelected && <span className="text-blue-600 font-black text-sm">#{selectedDistributors.indexOf(d) + 1}</span>}
-                          <span className="font-bold text-gray-900 text-sm">{d.name}</span>
-                        </div>
-                        <AgenticBadge pass={d.pdpAddressable} />
+              <button onClick={() => setStep("select")} className="text-xs text-gray-400 hover:text-gray-600 underline">← Back</button>
+            </div>
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
+              <div className="text-xs text-blue-500 font-bold uppercase tracking-wide">Selected Part</div>
+              <div className="font-black text-blue-900">{selectedPart?.partNumber}</div>
+              <div className="text-sm text-blue-700">{selectedPart?.name}</div>
+            </div>
+            <div className="bg-gray-900 text-white rounded-lg p-4 mb-4 text-sm">
+              <span className="font-bold">Agentic discoverability:</span> AI procurement agents query part numbers directly via URL. Distributors that return search pages instead of product pages are <span className="text-red-400 font-bold">invisible to AI</span> — your parts cannot be found, specified, or purchased through agentic workflows.
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+              {discoverabilityData.map((d, i) => {
+                const isSelected = selectedDistributors.find(s => s.name === d.name);
+                return (
+                  <div key={i} onClick={() => toggleDistributor(d)}
+                    className={`rounded-lg border-2 p-4 cursor-pointer transition-all ${isSelected ? "border-blue-500 bg-blue-50" : d.pdpAddressable ? "border-green-200 bg-green-50 hover:border-green-400" : "border-red-200 bg-red-50 hover:border-red-400"}`}>
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        {isSelected && <span className="text-blue-600 font-black text-sm">#{selectedDistributors.indexOf(d) + 1}</span>}
+                        <span className="font-bold text-gray-900 text-sm">{d.name}</span>
                       </div>
-                      <div className="text-xs text-gray-500 mb-1">{d.domain} · <span className="capitalize">{d.relationship}</span></div>
-                      <div className={`text-xs font-medium ${d.pdpAddressable ? "text-green-700" : "text-red-700"}`}>{d.note}</div>
+                      <AgenticBadge pass={d.pdpAddressable} />
                     </div>
-                  );
-                })}
-              </div>
-              {error && <div className="text-red-600 text-sm mb-3">{error}</div>}
-              <div className="flex items-center gap-4">
-                <button onClick={confirmDistributors}
-                  disabled={selectedDistributors.length !== 5}
-                  className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white font-bold px-6 py-2.5 rounded-lg text-sm">
-                  Audit Selected {selectedDistributors.length > 0 ? `(${selectedDistributors.length}/5)` : ""} →
-                </button>
-                <span className="text-xs text-gray-400">Select exactly 5 distributors</span>
-              </div>
+                    <div className="text-xs text-gray-500 mb-1">{d.domain} · <span className="capitalize">{d.relationship}</span></div>
+                    <div className={`text-xs font-medium ${d.pdpAddressable ? "text-green-700" : "text-red-700"}`}>{d.note}</div>
+                  </div>
+                );
+              })}
+            </div>
+            {error && <div className="text-red-600 text-sm mb-3">{error}</div>}
+            <div className="flex items-center gap-4">
+              <button onClick={confirmDistributors} disabled={selectedDistributors.length !== 5}
+                className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white font-bold px-6 py-2.5 rounded-lg text-sm">
+                Audit Selected {selectedDistributors.length > 0 ? `(${selectedDistributors.length}/5)` : ""} →
+              </button>
+              <span className="text-xs text-gray-400">Select exactly 5 distributors</span>
             </div>
           </div>
         )}
@@ -653,7 +687,7 @@ Respond ONLY with valid JSON, no markdown:
         {step === "audit" && (
           <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
             <div className="font-semibold text-gray-700 mb-1">Auditing {selectedPart?.partNumber}</div>
-            <div className="text-gray-400 text-sm mb-4">Scoring manufacturer + {selectedDistributors.map(d => d.name).join(", ")}...</div>
+            <div className="text-gray-400 text-sm mb-4">Fetching live page content + scoring manufacturer + {selectedDistributors.map(d => d.name).join(", ")}...</div>
             <div className="flex justify-center gap-1 mb-4">{[0,1,2,3].map(i => (
               <div key={i} className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
             ))}</div>

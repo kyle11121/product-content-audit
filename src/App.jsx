@@ -381,6 +381,37 @@ Respond with ONLY a raw JSON array, no markdown:
     }));
   };
 
+  const checkPageValidity = async (content, url, partNumber, siteName) => {
+    const prompt = `You are checking whether a fetched web page is a real product detail page.
+
+Part number: "${partNumber}"
+Site: ${siteName}
+URL: ${url}
+
+PAGE CONTENT:
+---
+${content.slice(0, 3000)}
+---
+
+Is this a real product detail page for part "${partNumber}"?
+
+A real PDP contains product-specific content: title, specs, price, availability, or description for this specific part.
+
+NOT a real PDP: error pages, 404s, search results pages, "no results found" pages, category pages, bot challenge pages, country selection pages, homepages.
+
+Respond ONLY with valid JSON, no markdown:
+{"isValidPDP": true or false, "reason": "one sentence"}`;
+
+    try {
+      const raw = await callClaude([{ role: "user", content: prompt }], 200);
+      const clean = raw.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1));
+      return parsed;
+    } catch {
+      return { isValidPDP: false, reason: "validity check failed" };
+    }
+  };
+
   const auditPage = async (url, siteName, role) => {
     const fields = role === "manufacturer" ? SHARED_FIELDS : FIELD_DEFINITIONS;
     const roleNote = role === "manufacturer"
@@ -390,20 +421,20 @@ Respond with ONLY a raw JSON array, no markdown:
     addLog(`    Fetching live content for ${siteName}...`);
     const pageContent = await fetchPageContent(url);
 
-    // Hard stop — no training data fallback, no hallucination
     if (!pageContent) {
       addLog(`✗ ${siteName} — page fetch failed (blocked or unreachable)`);
-      return {
-        siteName, role, url,
-        contentSource: "blocked",
-        overallScore: null,
-        topGaps: [],
-        summary: "",
-        blocked: true,
-        fields: {}
-      };
+      return { siteName, role, url, contentSource: "blocked", overallScore: null, topGaps: [], summary: "", blocked: true, blockedReason: "Page could not be fetched", fields: {} };
     }
 
+    // Validity pre-check — confirm this is actually a PDP before scoring
+    addLog(`    Validating page content for ${siteName}...`);
+    const validity = await checkPageValidity(pageContent, url, selectedPart?.partNumber, siteName);
+    if (!validity.isValidPDP) {
+      addLog(`✗ ${siteName} — not a valid PDP (${validity.reason})`);
+      return { siteName, role, url, contentSource: "blocked", overallScore: null, topGaps: [], summary: "", blocked: true, blockedReason: validity.reason, fields: {} };
+    }
+
+    addLog(`    Scoring ${siteName}...`);
     const prompt = `You are auditing product content quality for part "${selectedPart?.partNumber}" from "${manufacturer}".
 Site: ${siteName} | Role: ${role} | URL: ${url}
 ${roleNote}
@@ -412,7 +443,7 @@ LIVE PAGE CONTENT (from ${url}):
 ---
 ${pageContent}
 ---
-Score ONLY based on the above content. Do not use prior knowledge or make assumptions.
+Score ONLY based on the above content. Do not use prior knowledge or make assumptions about what the site "typically" has.
 
 SCORING RULES:
 - high = present and complete in the page content above
@@ -554,7 +585,7 @@ Respond ONLY with valid JSON, no markdown:
                 {r.blocked ? (
                   <div className="mt-1">
                     <div className="text-sm font-bold text-gray-400">Unauditable</div>
-                    <div className="text-xs text-gray-400 mt-1 mb-2">Page blocked or unreachable. Paste a working URL to re-audit.</div>
+                    <div className="text-xs text-gray-400 mt-1 mb-2">{r.blockedReason || "Page blocked or unreachable"}. Paste a working URL to re-audit.</div>
                     <input
                       className="w-full border border-gray-300 rounded px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 mb-1"
                       placeholder="https://..."

@@ -34,28 +34,52 @@ app.post("/api/search", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Firecrawl page reader proxy
+// Jina AI fallback fetcher — no key required
+const fetchViaJina = async (url) => {
+  const jinaUrl = `https://r.jina.ai/${url}`;
+  const r = await fetch(jinaUrl, {
+    headers: { "Accept": "text/plain", "X-Return-Format": "text", "X-Timeout": "15" }
+  });
+  if (!r.ok) throw new Error(`Jina fetch failed: ${r.status}`);
+  const text = await r.text();
+  if (!text || text.length < 200) throw new Error("Jina returned empty content");
+  return text;
+};
+
+// Page reader proxy — tries Firecrawl first, falls back to Jina AI
 app.post("/api/fetch-page", async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: "url required" });
   if (url.includes("google.com/search")) {
     return res.status(400).json({ error: "Cannot fetch Google search pages — URL was not resolved to a PDP" });
   }
+
+  // Try Firecrawl if key is available
   const k = process.env.FIRECRAWL_API_KEY;
-  if (!k) return res.status(500).json({ error: "FIRECRAWL_API_KEY not set" });
+  if (k) {
+    try {
+      const r = await fetch("https://api.firecrawl.dev/v1/scrape", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${k}` },
+        body: JSON.stringify({ url, formats: ["markdown"], onlyMainContent: true, timeout: 20000 })
+      });
+      if (r.ok) {
+        const data = await r.json();
+        const text = data.success ? (data.data?.markdown || "") : "";
+        if (text && text.length >= 200) {
+          return res.json({ content: text.slice(0, 8000), truncated: text.length > 8000, fetcher: "firecrawl" });
+        }
+      }
+    } catch (_) { /* fall through to Jina */ }
+  }
+
+  // Fallback: Jina AI (no key required)
   try {
-    const r = await fetch("https://api.firecrawl.dev/v1/scrape", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${k}` },
-      body: JSON.stringify({ url, formats: ["markdown"], onlyMainContent: true, timeout: 20000 })
-    });
-    if (!r.ok) return res.status(502).json({ error: `Firecrawl fetch failed: ${r.status}` });
-    const data = await r.json();
-    if (!data.success) return res.status(502).json({ error: data.error || "Firecrawl returned success:false" });
-    const text = data.data?.markdown || "";
-    if (!text) return res.status(502).json({ error: "Firecrawl returned empty content" });
-    res.json({ content: text.slice(0, 8000), truncated: text.length > 8000 });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    const text = await fetchViaJina(url);
+    return res.json({ content: text.slice(0, 8000), truncated: text.length > 8000, fetcher: "jina" });
+  } catch (e) {
+    return res.status(502).json({ error: `Both fetchers failed: ${e.message}` });
+  }
 });
 
 app.get("*", (req, res) => res.sendFile(path.join(__dirname, "dist", "index.html")));

@@ -455,17 +455,46 @@ Respond ONLY with valid JSON, no markdown:
     addLog(`    Fetching live content for ${siteName}...`);
     const pageContent = await fetchPageContent(url);
 
+    // Training data fallback — used when live fetch fails or returns a bot-challenge page
+    const scoreFromTrainingData = async (reason) => {
+      addLog(`⚠ ${siteName} — ${reason}. Scoring from AI training data...`);
+      const trainingPrompt = `You are auditing product content quality for part "${selectedPart?.partNumber}" from "${manufacturer}".
+Site: ${siteName} | Role: ${role} | URL: ${url}
+${roleNote}
+
+NOTE: The live page could not be fetched (${reason}). Score this distributor based on your training knowledge of how ${siteName} typically presents products like "${selectedPart?.partNumber}" from "${manufacturer}" on their website.
+
+Be honest and conservative — only score "high" if you are confident this content is typically present and complete on ${siteName} product pages. Mark fields "low" if you are uncertain.
+
+SCORING RULES:
+- high = you are confident this content is present and complete on ${siteName} product pages for this type of part
+- medium = partially present or you are uncertain
+- low = typically missing, or you have insufficient knowledge
+
+For each field: "value" (brief description of what is typically shown, or "UNKNOWN"), "score", "notes".
+Fields: ${fields.map(f => f.key + ": " + f.label).join(", ")}
+Also: "overallScore", "topGaps" (up to 3), "summary" (2 sentences noting this is from training data).
+
+Respond ONLY with valid JSON, no markdown:
+{"siteName":"${siteName}","role":"${role}","url":"${url}","contentSource":"training","overallScore":0,"topGaps":[],"summary":"","fields":{${fields.map(f => `"${f.key}":{"value":"","score":"low","notes":""}`).join(",")}}}`;
+      const raw = await callClaude([{ role: "user", content: trainingPrompt }], 3000);
+      const result = parseJSON(raw);
+      result.contentSource = "training";
+      result.blocked = false;
+      return result;
+    };
+
     if (!pageContent) {
-      addLog(`✗ ${siteName} — page fetch failed (blocked or unreachable)`);
-      return { siteName, role, url, contentSource: "blocked", overallScore: null, topGaps: [], summary: "", blocked: true, blockedReason: "Page could not be fetched", fields: {} };
+      try { return await scoreFromTrainingData("live page blocked or unreachable"); }
+      catch { return { siteName, role, url, contentSource: "blocked", overallScore: null, topGaps: [], summary: "", blocked: true, blockedReason: "Page could not be fetched", fields: {} }; }
     }
 
     // Validity pre-check — confirm this is actually a PDP before scoring
     addLog(`    Validating page content for ${siteName}...`);
     const validity = await checkPageValidity(pageContent, url, selectedPart?.partNumber, siteName);
     if (!validity.isValidPDP) {
-      addLog(`✗ ${siteName} — not a valid PDP (${validity.reason})`);
-      return { siteName, role, url, contentSource: "blocked", overallScore: null, topGaps: [], summary: "", blocked: true, blockedReason: validity.reason, fields: {} };
+      try { return await scoreFromTrainingData(validity.reason); }
+      catch { return { siteName, role, url, contentSource: "blocked", overallScore: null, topGaps: [], summary: "", blocked: true, blockedReason: validity.reason, fields: {} }; }
     }
 
     addLog(`    Scoring ${siteName}...`);
@@ -543,8 +572,9 @@ Respond ONLY with valid JSON, no markdown:
   );
 
   const SourceBadge = ({ source }) => {
-    if (source === "live")    return <span className="text-xs px-2 py-0.5 rounded font-medium bg-blue-100 text-blue-700">● Live Page</span>;
-    if (source === "blocked") return <span className="text-xs px-2 py-0.5 rounded font-medium bg-gray-200 text-gray-500">✗ Blocked</span>;
+    if (source === "live")     return <span className="text-xs px-2 py-0.5 rounded font-medium bg-blue-100 text-blue-700">● Live Page</span>;
+    if (source === "training") return <span className="text-xs px-2 py-0.5 rounded font-medium bg-purple-100 text-purple-700">○ Training Data</span>;
+    if (source === "blocked")  return <span className="text-xs px-2 py-0.5 rounded font-medium bg-gray-200 text-gray-500">✗ Blocked</span>;
     return null;
   };
 
@@ -991,6 +1021,13 @@ Respond ONLY with valid JSON, no markdown:
                 </button>
               ))}
             </div>
+            {log.length > 0 && (
+              <div className="px-6 pt-4">
+                <div className="bg-gray-900 rounded-lg p-3 text-xs text-green-400 font-mono space-y-1 max-h-32 overflow-y-auto">
+                  {log.map((l, i) => <div key={i}>{l}</div>)}
+                </div>
+              </div>
+            )}
             <div className="p-6">
               {activeTab === "gaps" && renderGapReport()}
               {activeTab === "matrix" && renderMatrix()}

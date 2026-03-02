@@ -191,6 +191,22 @@ If no result is a good PDP match, return: {"url":"","reason":"no PDP found","con
   }
 };
 
+// Ask Claude for the correct website domain when a manufacturer isn't in the hardcoded registry
+const resolveManufacturerDomain = async (mfrName) => {
+  const prompt = `What is the primary public website domain for the manufacturer "${mfrName}"?
+Examples: "Protective Industrial Products" → "pipglobal.com", "TE Connectivity" → "te.com", "3M" → "3m.com", "Brady Corporation" → "bradyid.com"
+Respond ONLY with valid JSON, no markdown:
+{"domain":"example.com","confidence":"high|medium|low"}
+If uncertain, return: {"domain":"","confidence":"low"}`;
+  try {
+    const raw = await callClaude([{ role: "user", content: prompt }], 150);
+    const clean = raw.replace(/```json|```/g, "").trim();
+    const parsed = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1));
+    if (parsed.domain && parsed.confidence !== "low") return parsed.domain;
+    return null;
+  } catch { return null; }
+};
+
 const fetchPageContent = async (url) => {
   try {
     const res = await fetch("/api/fetch-page", {
@@ -356,9 +372,27 @@ Respond with ONLY a raw JSON array, no markdown:
     setUrlStatus(statusMap);
     setStep("configure");
 
-    // Resolve manufacturer URL — if it looks like a generic search, try SerpAPI
-    const mfrDomainGuess = manufacturer.toLowerCase().replace(/[^a-z0-9]/g, "") + ".com";
-    const resolvedMfr = await resolveUrlViaSerpAPI(selectedPart.partNumber, manufacturer, manufacturer, mfrDomainGuess);
+    // Resolve manufacturer URL — use Claude to determine correct domain for unknown manufacturers
+    const m = manufacturer.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const isKnownMfr = !!MFR_DOMAINS[m] || Object.entries(MFR_DOMAINS).some(([k]) => {
+      const nk = k.replace(/[^a-z0-9]/g, "");
+      return nk.length >= 4 && m.includes(nk);
+    });
+    let mfrDomain;
+    if (isKnownMfr) {
+      mfrDomain = m + ".com";
+    } else {
+      addLog("Resolving manufacturer domain via Claude...");
+      const claudeDomain = await resolveManufacturerDomain(manufacturer);
+      if (claudeDomain) {
+        mfrDomain = claudeDomain;
+        addLog(`Manufacturer domain resolved: ${claudeDomain}`);
+        setUrls(u => ({ ...u, manufacturer: `https://www.${claudeDomain}/search?q=${encodeURIComponent(selectedPart.partNumber)}` }));
+      } else {
+        mfrDomain = m + ".com";
+      }
+    }
+    const resolvedMfr = await resolveUrlViaSerpAPI(selectedPart.partNumber, manufacturer, manufacturer, mfrDomain);
     if (resolvedMfr) {
       setUrls(u => ({ ...u, manufacturer: resolvedMfr }));
       setUrlStatus(s => ({ ...s, manufacturer: "resolved" }));
@@ -503,8 +537,8 @@ Respond ONLY with valid JSON, no markdown:
   );
 
   const AgenticBadge = ({ pass }) => (
-    <span className={`text-xs px-2 py-0.5 rounded font-bold border ${pass ? "bg-green-100 text-green-700 border-green-200" : "bg-red-100 text-red-700 border-red-200"}`}>
-      {pass ? "✓ AI-Visible" : "✗ AI-Invisible"}
+    <span className={`text-xs px-2 py-0.5 rounded font-bold border ${pass ? "bg-green-100 text-green-700 border-green-200" : "bg-yellow-100 text-yellow-700 border-yellow-200"}`}>
+      {pass ? "✓ Agentic-Ready" : "⚠ Not Agentic-Ready"}
     </span>
   );
 
@@ -647,20 +681,20 @@ Respond ONLY with valid JSON, no markdown:
     <div className="space-y-4">
       <div className="bg-gray-900 rounded-xl p-5 text-white mb-4">
         <h3 className="font-black text-lg mb-1">Agentic Search Discoverability</h3>
-        <p className="text-gray-400 text-sm">AI agents and procurement bots query part numbers directly via URL. Distributors that return search pages instead of product pages are effectively invisible to agentic search — meaning your parts can't be found, specified, or purchased through AI-powered workflows.</p>
+        <p className="text-gray-400 text-sm">AI agents and procurement bots query part numbers directly via URL. Distributors that return search pages instead of product pages creates friction in automated procurement workflows, AI-powered sourcing tools, and structured data integrations.</p>
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {discoverabilityData.map((d, i) => (
-          <div key={i} className={`rounded-lg border-2 p-4 ${d.pdpAddressable ? "border-green-200 bg-green-50" : "border-red-200 bg-red-50"}`}>
+          <div key={i} className={`rounded-lg border-2 p-4 ${d.pdpAddressable ? "border-green-200 bg-green-50" : "border-yellow-200 bg-yellow-50"}`}>
             <div className="flex items-center justify-between mb-2">
               <span className="font-bold text-gray-900">{d.name}</span>
               <AgenticBadge pass={d.pdpAddressable} />
             </div>
             <div className="text-xs text-gray-500 mb-1">{d.domain} · <span className="capitalize">{d.relationship}</span></div>
-            <div className={`text-xs font-medium ${d.pdpAddressable ? "text-green-700" : "text-red-700"}`}>{d.note}</div>
+            <div className={`text-xs font-medium ${d.pdpAddressable ? "text-green-700" : "text-yellow-700"}`}>{d.note}</div>
             {!d.pdpAddressable && (
-              <div className="mt-2 text-xs text-red-600 bg-red-100 rounded p-2">
-                ⚠ When an AI agent queries "{selectedPart?.partNumber}" on {d.name}, it receives a search results page. The agent cannot reliably extract product specifications, pricing, or availability.
+              <div className="mt-2 text-xs text-yellow-700 bg-yellow-100 rounded p-2">
+                ⚠ Automated procurement agents cannot directly retrieve product data for this part without an intermediate search step — creating friction that increases as agentic buying accelerates.
               </div>
             )}
           </div>
@@ -668,7 +702,7 @@ Respond ONLY with valid JSON, no markdown:
       </div>
       <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
         <div className="font-bold text-orange-900 mb-1">
-          {discoverabilityData.filter(d => !d.pdpAddressable).length} of {discoverabilityData.length} distributors fail agentic discoverability
+          {discoverabilityData.filter(d => !d.pdpAddressable).length} of {discoverabilityData.length} distributors require an intermediate search step for agentic access
         </div>
         <div className="text-sm text-orange-800">
           As AI-powered procurement accelerates, parts that aren't directly addressable by part number will be systematically excluded from agentic sourcing workflows — regardless of content quality on the page.
@@ -820,7 +854,7 @@ Respond ONLY with valid JSON, no markdown:
             <div className="flex items-center justify-between mb-2">
               <div>
                 <h2 className="font-black text-gray-900 text-lg">Step 3 — Agentic Discoverability</h2>
-                <p className="text-sm text-gray-500">Which distributors are visible to AI agents? Select 5 to audit.</p>
+                <p className="text-sm text-gray-500">Which distributors are agentic-ready? Select 5 to audit.</p>
               </div>
               <button onClick={() => setStep("select")} className="text-xs text-gray-400 hover:text-gray-600 underline">← Back</button>
             </div>
@@ -830,14 +864,14 @@ Respond ONLY with valid JSON, no markdown:
               <div className="text-sm text-blue-700">{selectedPart?.name}</div>
             </div>
             <div className="bg-gray-900 text-white rounded-lg p-4 mb-4 text-sm">
-              <span className="font-bold">Agentic discoverability:</span> AI procurement agents query part numbers directly via URL. Distributors that return search pages are <span className="text-red-400 font-bold">invisible to AI</span> — parts cannot be found or purchased through agentic workflows.
+              <span className="font-bold">Agentic discoverability:</span> AI procurement agents query part numbers directly via URL. Distributors that return search pages instead of product pages are <span className="text-yellow-400 font-bold">not agentic-ready</span> — this creates friction in automated procurement workflows, AI-powered sourcing tools, and structured data integrations.
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
               {discoverabilityData.map((d, i) => {
                 const isSelected = selectedDistributors.find(s => s.name === d.name);
                 return (
                   <div key={i} onClick={() => toggleDistributor(d)}
-                    className={`rounded-lg border-2 p-4 cursor-pointer transition-all ${isSelected ? "border-blue-500 bg-blue-50" : d.pdpAddressable ? "border-green-200 bg-green-50 hover:border-green-400" : "border-red-200 bg-red-50 hover:border-red-400"}`}>
+                    className={`rounded-lg border-2 p-4 cursor-pointer transition-all ${isSelected ? "border-blue-500 bg-blue-50" : d.pdpAddressable ? "border-green-200 bg-green-50 hover:border-green-400" : "border-yellow-200 bg-yellow-50 hover:border-yellow-400"}`}>
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
                         {isSelected && <span className="text-blue-600 font-black text-sm">#{selectedDistributors.indexOf(d) + 1}</span>}
@@ -846,7 +880,7 @@ Respond ONLY with valid JSON, no markdown:
                       <AgenticBadge pass={d.pdpAddressable} />
                     </div>
                     <div className="text-xs text-gray-500 mb-1">{d.domain} · <span className="capitalize">{d.relationship}</span></div>
-                    <div className={`text-xs font-medium ${d.pdpAddressable ? "text-green-700" : "text-red-700"}`}>{d.note}</div>
+                    <div className={`text-xs font-medium ${d.pdpAddressable ? "text-green-700" : "text-yellow-700"}`}>{d.note}</div>
                   </div>
                 );
               })}

@@ -34,6 +34,17 @@ app.post("/api/search", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Strip HTML to readable plain text — removes script/style blocks then all tags
+const htmlToText = (html) => {
+  return html
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
+    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"')
+    .replace(/\s+/g, " ")
+    .trim();
+};
+
 // Brightdata Web Unlocker — primary fetcher
 const fetchViaBrightdata = async (url) => {
   const k = process.env.BRIGHTDATA_API_KEY;
@@ -44,8 +55,10 @@ const fetchViaBrightdata = async (url) => {
     body: JSON.stringify({ zone: "web_unlocker1", url, format: "raw" })
   });
   if (!r.ok) throw new Error(`Brightdata failed: ${r.status}`);
-  const text = await r.text();
-  if (!text || text.length < 200) throw new Error("Brightdata returned empty content");
+  const html = await r.text();
+  if (!html || html.length < 200) throw new Error("Brightdata returned empty content");
+  const text = htmlToText(html);
+  if (text.length < 100) throw new Error("Brightdata page had no readable text content");
   return text;
 };
 
@@ -73,7 +86,7 @@ app.post("/api/fetch-page", async (req, res) => {
   if (process.env.BRIGHTDATA_API_KEY) {
     try {
       const text = await fetchViaBrightdata(url);
-      return res.json({ content: text.slice(0, 8000), truncated: text.length > 8000, fetcher: "brightdata" });
+      return res.json({ content: text.slice(0, 15000), truncated: text.length > 15000, fetcher: "brightdata" });
     } catch (e) { console.error("Brightdata failed:", e.message); /* fall through */ }
   }
 

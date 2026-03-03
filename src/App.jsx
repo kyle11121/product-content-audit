@@ -183,21 +183,24 @@ const serpSearch = async (query) => {
 
 // Use SerpAPI + Claude to find best PDP URL for a distributor
 // Returns: { url, pdpFound } — pdpFound=true means a real product page was located
-const resolveUrlViaSerpAPI = async (partNumber, mfrName, distName, domain) => {
+const resolveUrlViaSerpAPI = async (partNumber, mfrName, distName, domain, productName) => {
   const mpnClean = partNumber.replace(/[-\s]/g, "");
   const mpnVariants = [partNumber];
   if (mpnClean !== partNumber) mpnVariants.push(mpnClean);
-  // Also try with common separator variants
   if (partNumber.includes("-")) mpnVariants.push(partNumber.replace(/-/g, ""));
 
-  // Search strategies — ordered by specificity
+  // Search strategies — use both MPN and product name
   const queries = [
     `"${partNumber}" "${mfrName}" site:${domain}`,
     `"${partNumber}" site:${domain}`,
     ...mpnVariants.slice(1).map(v => `"${v}" site:${domain}`),
+    // Product name searches — critical for distributors that don't index by MPN
+    ...(productName && productName !== partNumber ? [
+      `"${productName}" "${mfrName}" site:${domain}`,
+      `${productName} ${mfrName} site:${domain}`,
+    ] : []),
     `${partNumber} ${mfrName} product site:${domain}`,
     `${partNumber} site:${domain}`,
-    // Last resort: broader search without site: restriction
     `"${partNumber}" "${mfrName}" ${distName}`,
   ];
 
@@ -255,6 +258,116 @@ Respond with ONLY valid JSON, no markdown:
   } catch (e) {
     console.warn("Claude URL selection failed:", e.message);
     return { url: null, pdpFound: false };
+  }
+};
+
+// Search-first distributor discovery: search Google for the part, see which distributor sites have PDPs
+// Returns array of { name, domain, url, pdpFound, source } — only distributors that actually show up in search
+const discoverDistributorsViaSearch = async (partNumber, productName, mfrName, addLogFn) => {
+  // Build search queries — use both MPN and product name
+  const queries = [
+    `"${partNumber}" "${mfrName}" buy`,
+    `"${partNumber}" ${productName ? `"${productName}"` : ""} distributor`,
+    `"${partNumber}" ${mfrName} price availability`,
+    ...(productName && productName !== partNumber ? [
+      `"${productName}" "${mfrName}" distributor`,
+      `${productName} ${mfrName} buy online`,
+    ] : []),
+  ].filter(q => q.trim());
+
+  addLogFn("Searching Google for distributors that carry this part...");
+
+  // Collect all unique URLs from search results
+  const seenDomains = new Map(); // domain -> { name, url, title, pdpFound }
+
+  for (const q of queries) {
+    addLogFn(`  Searching: ${q}`);
+    const results = await serpSearch(q);
+    for (const r of results) {
+      try {
+        const hostname = new URL(r.url).hostname.replace("www.", "");
+        // Skip manufacturer's own site, Google, Amazon, eBay
+        if (hostname.includes(mfrName.toLowerCase().replace(/[^a-z0-9]/g, ""))) continue;
+        if (["google.com", "amazon.com", "ebay.com", "wikipedia.org", "youtube.com", "reddit.com", "linkedin.com"].some(d => hostname.includes(d))) continue;
+
+        if (!seenDomains.has(hostname)) {
+          const isPDP = !isSearchPageUrl(r.url);
+          const hasPart = urlContainsPart(r.url, partNumber);
+          seenDomains.set(hostname, {
+            domain: hostname,
+            url: r.url,
+            title: r.title,
+            snippet: r.snippet,
+            pdpFound: isPDP && hasPart,
+            pdpLikely: isPDP,
+            source: "search",
+          });
+        } else if (!seenDomains.get(hostname).pdpFound) {
+          // Upgrade if we find a better URL for same domain
+          const isPDP = !isSearchPageUrl(r.url);
+          const hasPart = urlContainsPart(r.url, partNumber);
+          if (isPDP && hasPart) {
+            seenDomains.set(hostname, { ...seenDomains.get(hostname), url: r.url, pdpFound: true, pdpLikely: true });
+          }
+        }
+      } catch { /* skip invalid URLs */ }
+    }
+  }
+
+  // Convert to array, sort: confirmed PDPs first, then likely PDPs, then others
+  const found = Array.from(seenDomains.values())
+    .sort((a, b) => {
+      if (a.pdpFound !== b.pdpFound) return b.pdpFound ? 1 : -1;
+      if (a.pdpLikely !== b.pdpLikely) return b.pdpLikely ? 1 : -1;
+      return 0;
+    });
+
+  addLogFn(`Found ${found.length} distributor sites in search results (${found.filter(f => f.pdpFound).length} with confirmed PDPs)`);
+  return found;
+};
+
+// Merge search-discovered distributors with Claude's knowledge for naming and classification
+const classifyDistributors = async (searchResults, mfrName, partNumber) => {
+  if (!searchResults.length) return [];
+  const domainList = searchResults.map(r => r.domain).join(", ");
+  const prompt = `You are a B2B distribution channel expert. I found these distributor websites in Google search results for part "${partNumber}" from manufacturer "${mfrName}":
+
+Domains: ${domainList}
+
+For each domain, provide the distributor's proper name and relationship type. If you don't recognize a domain, still include it with your best guess.
+
+Respond with ONLY a raw JSON array, no markdown:
+[{"domain":"example.com","name":"Example Corp","relationship":"authorized|broad-catalog|regional|specialty|unknown","verticalFit":"brief note"}]`;
+
+  try {
+    const raw = await callClaude([{ role: "user", content: prompt }], 2000);
+    const classified = parseJSON(raw);
+    // Merge classification back into search results
+    return searchResults.map(sr => {
+      const cls = classified.find(c => sr.domain.includes(c.domain.replace("www.", "")) || c.domain.includes(sr.domain.replace("www.", "")));
+      return {
+        ...sr,
+        name: cls?.name || sr.domain,
+        relationship: cls?.relationship || "unknown",
+        verticalFit: cls?.verticalFit || "",
+        pdpAddressable: sr.pdpFound,
+        note: sr.pdpFound
+          ? `PDP found in Google search results — confirmed this distributor carries ${partNumber}`
+          : sr.pdpLikely
+            ? `Page found but could not confirm it's a PDP — may carry ${partNumber}`
+            : `Appeared in search results but no direct product page found for ${partNumber}`,
+      };
+    });
+  } catch {
+    // If classification fails, return with domain as name
+    return searchResults.map(sr => ({
+      ...sr,
+      name: sr.domain,
+      relationship: "unknown",
+      verticalFit: "",
+      pdpAddressable: sr.pdpFound,
+      note: sr.pdpFound ? "PDP confirmed via search" : "No PDP confirmed",
+    }));
   }
 };
 
@@ -401,31 +514,15 @@ Respond with ONLY valid JSON, no markdown:
           manufacturerUrl: inputMfrUrl.trim()
         };
         addLog(`Extracted: ${autopart.partNumber} — ${autopart.name}`);
-        addLog("Discovering distributors that carry this part...");
-        const distRaw = await callClaude([{ role: "user", content: `You are a B2B distribution channel expert with deep knowledge of manufacturer-distributor relationships.
-
-Identify the top 10 distributors most likely to carry part number "${autopart.partNumber}" from manufacturer "${manufacturer}"${hasCat ? ` in the category "${category.trim()}"` : ""}.
-
-CRITICAL RULES:
-- Only include distributors that are KNOWN authorized distributors or major broad-catalog distributors for "${manufacturer}" specifically
-- Do NOT include generic electronics distributors if "${manufacturer}" is not an electronics company
-- Do NOT include distributors that would not reasonably carry this manufacturer's products
-- Consider the manufacturer's actual distribution channel: electrical/datacomm distributors for cable companies, industrial distributors for MRO, etc.
-- Rank by likelihood of actually stocking this specific part number
-
-Use base domain only for domain field. Common domains: "digikey.com", "mouser.com", "arrow.com", "newark.com", "rs-online.com", "grainger.com", "alliedelec.com", "galco.com", "tme.eu", "farnell.com", "fastenal.com", "uline.com", "mcmaster.com", "mscdirect.com", "wesco.com", "anixter.com", "graybar.com", "heilind.com", "rfrconnector.com"
-
-Respond with ONLY a raw JSON array, no markdown:
-[{"name":"","domain":"","confidence":"high|medium|low","relationship":"authorized|broad-catalog|regional","verticalFit":"why this distributor fits this manufacturer","rank":1}]` }]);
-        const dists = parseJSON(distRaw);
-        addLog(`Found ${dists.length} candidate distributors`);
-        setDiscoveredDistributors(dists);
-        // Set all as "pending verification" — agentic status determined during URL resolution
-        const data = dists.map(dist => ({
+        // SEARCH-FIRST: find distributors that actually carry this part via Google
+        const searchResults = await discoverDistributorsViaSearch(autopart.partNumber, autopart.name, manufacturer, addLog);
+        const classified = await classifyDistributors(searchResults, manufacturer, autopart.partNumber);
+        addLog(`Classified ${classified.length} distributors`);
+        setDiscoveredDistributors(classified);
+        const data = classified.map((dist, i) => ({
           ...dist,
-          pdpAddressable: false, // Will be updated during URL resolution
-          note: "Agentic status will be verified during URL resolution",
-          url: buildFallbackUrl(dist.domain, autopart.partNumber)
+          rank: i + 1,
+          confidence: dist.pdpFound ? "high" : dist.pdpLikely ? "medium" : "low",
         }));
         setSelectedPart(autopart);
         setDiscoverabilityData(data);
@@ -435,37 +532,33 @@ Respond with ONLY a raw JSON array, no markdown:
       } else if (hasPart) {
         // Part number path — skip part discovery
         addLog(`Using provided part number: ${inputPartNumber.trim()}`);
+        // Get product name from Claude for better search queries
+        addLog("Getting product details for better search...");
+        let productName = inputPartNumber.trim();
+        try {
+          const nameRaw = await callClaude([{ role: "user", content: `What is the product name/description for part number "${inputPartNumber.trim()}" from manufacturer "${manufacturer}"${hasCat ? ` in the category "${category.trim()}"` : ""}?
+Respond with ONLY valid JSON, no markdown:
+{"name":"short product name/description","confidence":"high|medium|low"}` }], 150);
+          const nameResult = parseJSON(nameRaw);
+          if (nameResult.name && nameResult.confidence !== "low") productName = nameResult.name;
+        } catch { /* use part number as name fallback */ }
         const autopart = {
           partNumber: inputPartNumber.trim(),
-          name: inputPartNumber.trim(),
+          name: productName,
           confidence: "high",
           reason: "User-provided part number",
           manufacturerUrl: ""
         };
-        addLog("Discovering distributors that carry this part...");
-        const distRaw = await callClaude([{ role: "user", content: `You are a B2B distribution channel expert with deep knowledge of manufacturer-distributor relationships.
-
-Identify the top 10 distributors most likely to carry part number "${inputPartNumber.trim()}" from manufacturer "${manufacturer}"${hasCat ? ` in the category "${category.trim()}"` : ""}.
-
-CRITICAL RULES:
-- Only include distributors that are KNOWN authorized distributors or major broad-catalog distributors for "${manufacturer}" specifically
-- Do NOT include generic electronics distributors if "${manufacturer}" is not an electronics company
-- Do NOT include distributors that would not reasonably carry this manufacturer's products
-- Consider the manufacturer's actual distribution channel: electrical/datacomm distributors for cable companies, industrial distributors for MRO, etc.
-- Rank by likelihood of actually stocking this specific part number
-
-Use base domain only for domain field. Common domains: "digikey.com", "mouser.com", "arrow.com", "newark.com", "rs-online.com", "grainger.com", "alliedelec.com", "galco.com", "tme.eu", "farnell.com", "fastenal.com", "uline.com", "mcmaster.com", "mscdirect.com", "wesco.com", "anixter.com", "graybar.com", "heilind.com", "rfrconnector.com"
-
-Respond with ONLY a raw JSON array, no markdown:
-[{"name":"","domain":"","confidence":"high|medium|low","relationship":"authorized|broad-catalog|regional","verticalFit":"why this distributor fits this manufacturer","rank":1}]` }]);
-        const dists = parseJSON(distRaw);
-        addLog(`Found ${dists.length} candidate distributors`);
-        setDiscoveredDistributors(dists);
-        const data = dists.map(dist => ({
+        addLog(`Product: ${autopart.partNumber} — ${autopart.name}`);
+        // SEARCH-FIRST: find distributors that actually carry this part via Google
+        const searchResults = await discoverDistributorsViaSearch(autopart.partNumber, productName, manufacturer, addLog);
+        const classified = await classifyDistributors(searchResults, manufacturer, autopart.partNumber);
+        addLog(`Classified ${classified.length} distributors`);
+        setDiscoveredDistributors(classified);
+        const data = classified.map((dist, i) => ({
           ...dist,
-          pdpAddressable: false, // Will be updated during URL resolution
-          note: "Agentic status will be verified during URL resolution",
-          url: buildFallbackUrl(dist.domain, autopart.partNumber)
+          rank: i + 1,
+          confidence: dist.pdpFound ? "high" : dist.pdpLikely ? "medium" : "low",
         }));
         setSelectedPart(autopart);
         setDiscoverabilityData(data);
@@ -473,7 +566,7 @@ Respond with ONLY a raw JSON array, no markdown:
         setStep("discoverability");
 
       } else {
-        // Category-only path — discover parts and distributors
+        // Category-only path — discover parts via Claude, distributors discovered after part selection via search
         addLog("Discovering top parts...");
         const partsRaw = await callClaude([{ role: "user", content: `You are a product intelligence expert with deep knowledge of B2B manufacturing and industrial distribution.
 
@@ -483,50 +576,43 @@ CRITICAL RULES:
 - Only include part numbers you are HIGHLY CONFIDENT actually exist in ${manufacturer}'s catalog
 - These should be flagship or high-volume parts, not obscure variants
 - Use the EXACT manufacturer part number format (MPN), not distributor-specific SKUs
+- Include the common product name/description — this is critical for search
 - If you're not confident about a part number, use "medium" or "low" confidence and explain why
 
 Leave manufacturerUrl as empty string.
 
 Respond with ONLY a raw JSON array, no markdown:
-[{"partNumber":"","name":"","confidence":"high|medium|low","reason":"why this is a top part","manufacturerUrl":""}]` }]);
-
-        addLog("Discovering distributors for this manufacturer...");
-        const distRaw = await callClaude([{ role: "user", content: `You are a B2B distribution channel expert with deep knowledge of manufacturer-distributor relationships.
-
-Identify the top 10 distributors most likely to carry "${manufacturer}" products in the category "${category.trim()}".
-
-CRITICAL RULES:
-- Only include distributors that are KNOWN authorized distributors or major broad-catalog distributors for "${manufacturer}" specifically
-- Do NOT include generic electronics distributors if "${manufacturer}" is not an electronics company
-- Consider the manufacturer's actual distribution channel
-- Rank by likelihood of actually stocking ${manufacturer} products in this category
-
-Use base domain only for domain field. Common domains: "digikey.com", "mouser.com", "arrow.com", "newark.com", "rs-online.com", "grainger.com", "alliedelec.com", "galco.com", "tme.eu", "farnell.com", "fastenal.com", "uline.com", "mcmaster.com", "mscdirect.com", "wesco.com", "anixter.com", "graybar.com", "heilind.com"
-
-Respond with ONLY a raw JSON array, no markdown:
-[{"name":"","domain":"","confidence":"high|medium|low","relationship":"authorized|broad-catalog|regional","verticalFit":"why this distributor fits this manufacturer","rank":1}]` }]);
+[{"partNumber":"","name":"full product name/description","confidence":"high|medium|low","reason":"why this is a top part","manufacturerUrl":""}]` }]);
 
         const parts = parseJSON(partsRaw);
-        const dists = parseJSON(distRaw);
-        addLog(`Found ${parts.length} parts · ${dists.length} distributors`);
+        addLog(`Found ${parts.length} parts — select one to discover distributors`);
         setDiscoveredParts(parts);
-        setDiscoveredDistributors(dists);
+        // Distributors will be discovered via search after part selection
+        setDiscoveredDistributors([]);
         setStep("select");
       }
     } catch (e) { setError("Discovery failed: " + e.message); }
     setLoading(false);
   };
 
-  const selectPart = (part) => {
+  const selectPart = async (part) => {
     setSelectedPart(part);
-    const data = discoveredDistributors.map(dist => ({
+    setLoading(true);
+    setLog([]);
+    addLog(`Selected: ${part.partNumber} — ${part.name}`);
+    // SEARCH-FIRST: find distributors that actually carry this specific part via Google
+    const searchResults = await discoverDistributorsViaSearch(part.partNumber, part.name, manufacturer, addLog);
+    const classified = await classifyDistributors(searchResults, manufacturer, part.partNumber);
+    addLog(`Classified ${classified.length} distributors`);
+    setDiscoveredDistributors(classified);
+    const data = classified.map((dist, i) => ({
       ...dist,
-      pdpAddressable: false, // Will be updated during URL resolution
-      note: "Agentic status will be verified during URL resolution",
-      url: buildFallbackUrl(dist.domain, part.partNumber)
+      rank: i + 1,
+      confidence: dist.pdpFound ? "high" : dist.pdpLikely ? "medium" : "low",
     }));
     setDiscoverabilityData(data);
     setSelectedDistributors([]);
+    setLoading(false);
     setStep("discoverability");
   };
 
@@ -534,14 +620,14 @@ Respond with ONLY a raw JSON array, no markdown:
     setSelectedDistributors(prev => {
       const exists = prev.find(d => d.name === dist.name);
       if (exists) return prev.filter(d => d.name !== dist.name);
-      if (prev.length >= 5) return prev;
+      if (prev.length >= 10) return prev;
       return [...prev, dist];
     });
     setError("");
   };
 
   const confirmDistributors = async () => {
-    if (selectedDistributors.length !== 5) { setError("Select exactly 5 distributors to audit."); return; }
+    if (selectedDistributors.length < 1 || selectedDistributors.length > 10) { setError("Select 1–10 distributors to audit."); return; }
     setError("");
 
     const mfrUrl = resolveManufacturerUrl(manufacturer, selectedPart);
@@ -549,9 +635,10 @@ Respond with ONLY a raw JSON array, no markdown:
     const nameMap = { manufacturer };
     const statusMap = { manufacturer: "resolving" };
     selectedDistributors.forEach((d, i) => {
-      urlMap[`dist${i+1}`] = ""; // Don't pre-fill with search page URLs
+      // If search-first already found a PDP URL, pre-fill it
+      urlMap[`dist${i+1}`] = (d.pdpFound && d.url) ? d.url : "";
       nameMap[`dist${i+1}`] = d.name;
-      statusMap[`dist${i+1}`] = "resolving";
+      statusMap[`dist${i+1}`] = (d.pdpFound && d.url) ? "resolved" : "resolving";
     });
     setUrls(urlMap);
     setNames(nameMap);
@@ -578,7 +665,7 @@ Respond with ONLY a raw JSON array, no markdown:
         mfrDomain = m + ".com";
       }
     }
-    const mfrResult = await resolveUrlViaSerpAPI(selectedPart.partNumber, manufacturer, manufacturer, mfrDomain);
+    const mfrResult = await resolveUrlViaSerpAPI(selectedPart.partNumber, manufacturer, manufacturer, mfrDomain, selectedPart.name);
     if (mfrResult.pdpFound && mfrResult.url) {
       setUrls(u => ({ ...u, manufacturer: mfrResult.url }));
       setUrlStatus(s => ({ ...s, manufacturer: "resolved" }));
@@ -588,11 +675,16 @@ Respond with ONLY a raw JSON array, no markdown:
     }
 
     // Resolve each distributor via SerpAPI in parallel
-    // Also update agentic-ready status based on whether we found a real PDP
+    // Skip distributors that already have confirmed PDP URLs from search-first discovery
     await Promise.all(selectedDistributors.map(async (d, i) => {
       const key = `dist${i+1}`;
+      // If search-first already found a PDP, skip re-resolution
+      if (d.pdpFound && d.url && !isSearchPageUrl(d.url)) {
+        addLog(`✓ ${d.name} — PDP already confirmed from discovery`);
+        return;
+      }
       addLog(`Resolving PDP for ${d.name}...`);
-      const result = await resolveUrlViaSerpAPI(selectedPart.partNumber, manufacturer, d.name, d.domain);
+      const result = await resolveUrlViaSerpAPI(selectedPart.partNumber, manufacturer, d.name, d.domain, selectedPart.name);
       if (result.pdpFound && result.url) {
         setUrls(u => ({ ...u, [key]: result.url }));
         setUrlStatus(s => ({ ...s, [key]: "resolved" }));
@@ -805,7 +897,7 @@ Respond ONLY with valid JSON, no markdown:
     const all = [mfr, ...dists];
     return (
       <div className="space-y-5">
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
           {all.map((r, i) => {
             const discData = discoverabilityData.find(d => d.name === r.siteName);
             return (
@@ -1045,24 +1137,34 @@ Respond ONLY with valid JSON, no markdown:
               </div>
               <button onClick={() => setStep("discover")} className="text-xs text-gray-400 hover:text-gray-600 underline">← Back</button>
             </div>
-            <div className="space-y-2">
-              {discoveredParts.map((p, i) => (
-                <div key={i} onClick={() => selectPart(p)}
-                  className="border border-gray-200 rounded-lg p-4 hover:border-blue-400 hover:bg-blue-50 cursor-pointer transition-all">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-1 flex-wrap">
-                        <span className="font-black text-gray-900">{p.partNumber}</span>
-                        <ConfBadge c={p.confidence} />
+            {loading ? (
+              <div className="text-center py-8">
+                <div className="font-semibold text-gray-700 mb-2">Searching Google for distributors that carry {selectedPart?.partNumber || "this part"}...</div>
+                <div className="flex justify-center gap-1 mb-4">{[0,1,2,3].map(i => (
+                  <div key={i} className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
+                ))}</div>
+                {log.length > 0 && <div className="bg-gray-900 rounded-lg p-3 text-xs text-green-400 font-mono space-y-1 text-left max-w-lg mx-auto">{log.map((l, i) => <div key={i}>{l}</div>)}</div>}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {discoveredParts.map((p, i) => (
+                  <div key={i} onClick={() => selectPart(p)}
+                    className="border border-gray-200 rounded-lg p-4 hover:border-blue-400 hover:bg-blue-50 cursor-pointer transition-all">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-1 flex-wrap">
+                          <span className="font-black text-gray-900">{p.partNumber}</span>
+                          <ConfBadge c={p.confidence} />
+                        </div>
+                        <div className="text-sm text-gray-700 font-medium">{p.name}</div>
+                        <div className="text-xs text-gray-500 mt-1">{p.reason}</div>
                       </div>
-                      <div className="text-sm text-gray-700 font-medium">{p.name}</div>
-                      <div className="text-xs text-gray-500 mt-1">{p.reason}</div>
+                      <div className="text-blue-500 font-bold text-sm whitespace-nowrap">Select →</div>
                     </div>
-                    <div className="text-blue-500 font-bold text-sm whitespace-nowrap">Select →</div>
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -1071,7 +1173,7 @@ Respond ONLY with valid JSON, no markdown:
             <div className="flex items-center justify-between mb-2">
               <div>
                 <h2 className="font-black text-gray-900 text-lg">Step 3 — Agentic Discoverability</h2>
-                <p className="text-sm text-gray-500">Which distributors are agentic-ready? Select 5 to audit.</p>
+                <p className="text-sm text-gray-500">Distributors found via Google search for this part. Select up to 10 to audit.</p>
               </div>
               <button onClick={() => setStep("select")} className="text-xs text-gray-400 hover:text-gray-600 underline">← Back</button>
             </div>
@@ -1104,11 +1206,11 @@ Respond ONLY with valid JSON, no markdown:
             </div>
             {error && <div className="text-red-600 text-sm mb-3">{error}</div>}
             <div className="flex items-center gap-4">
-              <button onClick={confirmDistributors} disabled={selectedDistributors.length !== 5}
+              <button onClick={confirmDistributors} disabled={selectedDistributors.length < 1}
                 className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white font-bold px-6 py-2.5 rounded-lg text-sm">
-                Audit Selected {selectedDistributors.length > 0 ? `(${selectedDistributors.length}/5)` : ""} →
+                Audit Selected {selectedDistributors.length > 0 ? `(${selectedDistributors.length})` : ""} →
               </button>
-              <span className="text-xs text-gray-400">Select exactly 5 distributors</span>
+              <span className="text-xs text-gray-400">Select up to 10 distributors</span>
             </div>
           </div>
         )}

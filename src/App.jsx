@@ -30,7 +30,7 @@ const SCORE_COLORS = {
   low: "bg-red-100 text-red-800 border-red-200",
 };
 
-// Agentic-ready is now determined DYNAMICALLY based on whether SerpAPI resolves a direct PDP URL.
+// Agentic-ready is now determined DYNAMICALLY based on whether Google search resolves a direct PDP URL.
 // This registry is only used for fallback search-page URL construction — never for agentic status.
 const DISTRIBUTOR_REGISTRY = [
   { name: "Digi-Key", domain: "digikey.com" },
@@ -161,7 +161,7 @@ const callClaude = async (messages, maxTokens = 2000) => {
   return data.content.filter(b => b.type === "text").map(b => b.text).join("");
 };
 
-// Search Google via SerpAPI — returns [] on any failure
+// Search Google via Custom Search API — returns [] on any failure
 const serpSearch = async (query) => {
   try {
     const res = await fetch("/api/search", {
@@ -171,7 +171,7 @@ const serpSearch = async (query) => {
     });
     const data = await res.json();
     if (data.error) {
-      console.warn("SerpAPI error:", data.error);
+      console.warn("Google CSE error:", data.error);
       return [];
     }
     return data.results || [];
@@ -181,7 +181,7 @@ const serpSearch = async (query) => {
   }
 };
 
-// Use SerpAPI + Claude to find best PDP URL for a distributor
+// Use Google search + Claude to find best PDP URL for a distributor
 // Returns: { url, pdpFound } — pdpFound=true means a real product page was located
 const resolveUrlViaSerpAPI = async (partNumber, mfrName, distName, domain, productName) => {
   const mpnClean = partNumber.replace(/[-\s]/g, "");

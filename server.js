@@ -18,19 +18,55 @@ app.post("/api/claude", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// SerpAPI proxy — Google search returning organic results
+// In-memory search cache — avoids burning API quota on repeated queries
+const searchCache = new Map();
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+const getCachedSearch = (query) => {
+  const entry = searchCache.get(query);
+  if (entry && Date.now() - entry.ts < CACHE_TTL_MS) return entry.results;
+  if (entry) searchCache.delete(query);
+  return null;
+};
+
+// Google Custom Search API — replaces SerpAPI (100 free queries/day ≈ 3,000/month)
 app.post("/api/search", async (req, res) => {
-  const k = process.env.SERPAPI_KEY;
-  if (!k) return res.status(500).json({ error: "SERPAPI_KEY not set" });
+  const apiKey = process.env.GOOGLE_CSE_API_KEY;
+  const cx = process.env.GOOGLE_CSE_ID;
+  if (!apiKey || !cx) return res.status(500).json({ error: "GOOGLE_CSE_API_KEY and GOOGLE_CSE_ID must be set" });
   const { query } = req.body;
   if (!query) return res.status(400).json({ error: "query required" });
+
+  // Check cache first
+  const cached = getCachedSearch(query);
+  if (cached) return res.json({ results: cached, cached: true });
+
   try {
-    const params = new URLSearchParams({ q: query, api_key: k, engine: "google", num: "15", gl: "us", hl: "en" });
-    const r = await fetch(`https://serpapi.com/search?${params}`);
-    const data = await r.json();
-    if (data.error) return res.status(502).json({ error: `SerpAPI: ${data.error}` });
-    const results = (data.organic_results || []).map(r => ({ title: r.title, url: r.link, snippet: r.snippet }));
-    res.json({ results });
+    // Google CSE returns max 10 per request; fetch 2 pages for 20 results
+    const allResults = [];
+    for (const start of [1, 11]) {
+      const params = new URLSearchParams({
+        key: apiKey, cx, q: query, num: "10", start: String(start), gl: "us", hl: "en"
+      });
+      const r = await fetch(`https://www.googleapis.com/customsearch/v1?${params}`);
+      const data = await r.json();
+      if (data.error) {
+        // If second page fails (e.g., no more results), just use what we have
+        if (start > 1 && allResults.length > 0) break;
+        return res.status(502).json({ error: `Google CSE: ${data.error.message || JSON.stringify(data.error)}` });
+      }
+      const items = (data.items || []).map(item => ({
+        title: item.title,
+        url: item.link,
+        snippet: item.snippet || ""
+      }));
+      allResults.push(...items);
+      if (!data.items || data.items.length < 10) break; // no more pages
+    }
+
+    // Cache the results
+    searchCache.set(query, { results: allResults, ts: Date.now() });
+    res.json({ results: allResults });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

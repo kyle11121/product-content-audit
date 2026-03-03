@@ -29,10 +29,10 @@ const getCachedSearch = (query) => {
   return null;
 };
 
-// SerpAPI proxy — Google search returning organic results (with caching)
+// Serper.dev — Google search via POST (50k queries/mo for $50, with caching)
 app.post("/api/search", async (req, res) => {
-  const k = process.env.SERPAPI_KEY;
-  if (!k) return res.status(500).json({ error: "SERPAPI_KEY not set" });
+  const k = process.env.SERPER_API_KEY;
+  if (!k) return res.status(500).json({ error: "SERPER_API_KEY not set" });
   const { query } = req.body;
   if (!query) return res.status(400).json({ error: "query required" });
 
@@ -41,11 +41,14 @@ app.post("/api/search", async (req, res) => {
   if (cached) return res.json({ results: cached, cached: true });
 
   try {
-    const params = new URLSearchParams({ q: query, api_key: k, engine: "google", num: "15", gl: "us", hl: "en" });
-    const r = await fetch(`https://serpapi.com/search?${params}`);
+    const r = await fetch("https://google.serper.dev/search", {
+      method: "POST",
+      headers: { "X-API-KEY": k, "Content-Type": "application/json" },
+      body: JSON.stringify({ q: query, num: 20, gl: "us", hl: "en" })
+    });
     const data = await r.json();
-    if (data.error) return res.status(502).json({ error: `SerpAPI: ${data.error}` });
-    const results = (data.organic_results || []).map(r => ({ title: r.title, url: r.link, snippet: r.snippet }));
+    if (data.message) return res.status(502).json({ error: `Serper: ${data.message}` });
+    const results = (data.organic || []).map(r => ({ title: r.title, url: r.link, snippet: r.snippet || "" }));
 
     // Cache the results
     searchCache.set(query, { results, ts: Date.now() });

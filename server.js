@@ -29,44 +29,27 @@ const getCachedSearch = (query) => {
   return null;
 };
 
-// Google Custom Search API — replaces SerpAPI (100 free queries/day ≈ 3,000/month)
+// SerpAPI proxy — Google search returning organic results (with caching)
 app.post("/api/search", async (req, res) => {
-  const apiKey = process.env.GOOGLE_CSE_API_KEY;
-  const cx = process.env.GOOGLE_CSE_ID;
-  if (!apiKey || !cx) return res.status(500).json({ error: "GOOGLE_CSE_API_KEY and GOOGLE_CSE_ID must be set" });
+  const k = process.env.SERPAPI_KEY;
+  if (!k) return res.status(500).json({ error: "SERPAPI_KEY not set" });
   const { query } = req.body;
   if (!query) return res.status(400).json({ error: "query required" });
 
-  // Check cache first
+  // Check cache first — avoid burning quota on repeated queries
   const cached = getCachedSearch(query);
   if (cached) return res.json({ results: cached, cached: true });
 
   try {
-    // Google CSE returns max 10 per request; fetch 2 pages for 20 results
-    const allResults = [];
-    for (const start of [1, 11]) {
-      const params = new URLSearchParams({
-        key: apiKey, cx, q: query, num: "10", start: String(start), gl: "us", hl: "en"
-      });
-      const r = await fetch(`https://www.googleapis.com/customsearch/v1?${params}`);
-      const data = await r.json();
-      if (data.error) {
-        // If second page fails (e.g., no more results), just use what we have
-        if (start > 1 && allResults.length > 0) break;
-        return res.status(502).json({ error: `Google CSE: ${data.error.message || JSON.stringify(data.error)}` });
-      }
-      const items = (data.items || []).map(item => ({
-        title: item.title,
-        url: item.link,
-        snippet: item.snippet || ""
-      }));
-      allResults.push(...items);
-      if (!data.items || data.items.length < 10) break; // no more pages
-    }
+    const params = new URLSearchParams({ q: query, api_key: k, engine: "google", num: "15", gl: "us", hl: "en" });
+    const r = await fetch(`https://serpapi.com/search?${params}`);
+    const data = await r.json();
+    if (data.error) return res.status(502).json({ error: `SerpAPI: ${data.error}` });
+    const results = (data.organic_results || []).map(r => ({ title: r.title, url: r.link, snippet: r.snippet }));
 
     // Cache the results
-    searchCache.set(query, { results: allResults, ts: Date.now() });
-    res.json({ results: allResults });
+    searchCache.set(query, { results, ts: Date.now() });
+    res.json({ results });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

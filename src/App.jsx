@@ -289,13 +289,24 @@ const discoverDistributorsViaSearch = async (partNumber, productName, mfrName, a
         // Skip manufacturer's own site, Google, Amazon, eBay, and aggregator/search engines (not real distributors)
         if (hostname.includes(mfrName.toLowerCase().replace(/[^a-z0-9]/g, ""))) continue;
         if (["google.com", "amazon.com", "ebay.com", "wikipedia.org", "youtube.com", "reddit.com", "linkedin.com"].some(d => hostname.includes(d))) continue;
-        // Exclude parts search aggregators — these index distributors but don't sell or stock parts
+        // Exclude parts search aggregators and datasheet sites — not real distributors
         if (["octopart.com", "findchips.com", "partstack.com", "traceparts.com", "3dcontentcentral.com",
              "componentsearchengine.com", "snapeda.com", "ultralibrarian.com", "samacsys.com",
              "trustedparts.com", "questcomp.com", "partstat.com", "bom.com", "oemsecrets.com",
-             "electronic-parts-directory.com", "datasheets.com", "alldatasheet.com", "datasheet.live",
-             "everythingpe.com", "componentshub.com", "sourcengine.com"
+             "electronic-parts-directory.com", "datasheets.com", "datasheet.live",
+             "everythingpe.com", "componentshub.com", "sourcengine.com", "alibaba.com", "aliexpress.com"
         ].some(d => hostname.includes(d))) continue;
+        // Catch all alldatasheet variants (alldatasheet.com, alldatasheetde.com, etc.)
+        if (hostname.includes("alldatasheet")) continue;
+        // Filter to North America only — skip international/regional storefronts
+        // Reject country-code TLDs (except .com, .net, .org, .us, .ca, .io, .co)
+        const tld = hostname.split(".").pop();
+        const allowedTLDs = ["com", "net", "org", "us", "ca", "io", "co", "edu", "gov"];
+        if (!allowedTLDs.includes(tld)) continue;
+        // Reject regional subdomains (in.rsdelivers.com, africa.rsdelivers.com, mo.rsdelivers.com, etc.)
+        const parts = hostname.split(".");
+        const regionPrefixes = ["in", "africa", "mo", "it", "de", "fr", "uk", "eu", "au", "sg", "jp", "cn", "kr", "tw", "hk", "br", "mx", "za", "nz", "th", "my", "ph", "vn", "id"];
+        if (parts.length >= 3 && regionPrefixes.includes(parts[0])) continue;
 
         if (!seenDomains.has(hostname)) {
           const isPDP = !isSearchPageUrl(r.url);

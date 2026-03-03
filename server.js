@@ -25,7 +25,7 @@ app.post("/api/search", async (req, res) => {
   const { query } = req.body;
   if (!query) return res.status(400).json({ error: "query required" });
   try {
-    const params = new URLSearchParams({ q: query, api_key: k, engine: "google", num: "5", gl: "us", hl: "en" });
+    const params = new URLSearchParams({ q: query, api_key: k, engine: "google", num: "15", gl: "us", hl: "en" });
     const r = await fetch(`https://serpapi.com/search?${params}`);
     const data = await r.json();
     if (data.error) return res.status(502).json({ error: `SerpAPI: ${data.error}` });

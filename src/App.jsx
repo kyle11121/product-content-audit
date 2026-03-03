@@ -634,7 +634,7 @@ Respond with ONLY a raw JSON array, no markdown:
   };
 
   const confirmDistributors = async () => {
-    if (selectedDistributors.length < 1 || selectedDistributors.length > 10) { setError("Select 1–10 distributors to audit."); return; }
+    if (selectedDistributors.length < 1 || selectedDistributors.length > 20) { setError("Select 1–20 distributors to audit."); return; }
     setError("");
 
     const mfrUrl = resolveManufacturerUrl(manufacturer, selectedPart);
@@ -1092,7 +1092,7 @@ Respond ONLY with valid JSON, no markdown:
         {step === "discover" && (
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
             <h2 className="font-black text-gray-900 text-lg mb-1">Step 1 — Discover</h2>
-            <p className="text-sm text-gray-500 mb-5">Identifies top parts and top 10 distributors simultaneously.</p>
+            <p className="text-sm text-gray-500 mb-5">Identifies top parts and top 20 distributors simultaneously.</p>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-3 items-end">
               <div>
                 <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Manufacturer Name</label>
@@ -1180,7 +1180,7 @@ Respond ONLY with valid JSON, no markdown:
             <div className="flex items-center justify-between mb-2">
               <div>
                 <h2 className="font-black text-gray-900 text-lg">Step 3 — Agentic Discoverability</h2>
-                <p className="text-sm text-gray-500">Distributors found via Google search for this part. Select up to 10 to audit.</p>
+                <p className="text-sm text-gray-500">Distributors found via Google search for this part. Select up to 20 to audit.</p>
               </div>
               <button onClick={() => setStep("select")} className="text-xs text-gray-400 hover:text-gray-600 underline">← Back</button>
             </div>
@@ -1217,7 +1217,7 @@ Respond ONLY with valid JSON, no markdown:
                 className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white font-bold px-6 py-2.5 rounded-lg text-sm">
                 Audit Selected {selectedDistributors.length > 0 ? `(${selectedDistributors.length})` : ""} →
               </button>
-              <span className="text-xs text-gray-400">Select up to 10 distributors</span>
+              <span className="text-xs text-gray-400">Select up to 20 distributors</span>
             </div>
           </div>
         )}

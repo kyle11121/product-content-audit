@@ -52,7 +52,7 @@ const fetchViaBrightdata = async (url) => {
   const r = await fetch("https://api.brightdata.com/request", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${k}` },
-    body: JSON.stringify({ zone: "web_unlocker1", url, format: "raw" })
+    body: JSON.stringify({ zone: "web_unlocker1", url, format: "raw", render_js: true })
   });
   if (!r.ok) throw new Error(`Brightdata failed: ${r.status}`);
   const html = await r.text();

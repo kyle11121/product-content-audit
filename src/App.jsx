@@ -146,23 +146,30 @@ const serpSearch = async (query) => {
 // Use SerpAPI + Claude to find best PDP URL for a distributor
 // Returns: { url, source } where source is "serp" | "fallback"
 const resolveUrlViaSerpAPI = async (partNumber, mfrName, distName, domain) => {
-  const query = `"${partNumber}" site:${domain}`;
-  const results = await serpSearch(query);
+  // Normalize MPN variants — strip dashes/spaces for alternate searches
+  const mpnClean = partNumber.replace(/[-\s]/g, "");
 
-  if (!results.length) {
-    // Try broader query without quotes
-    const broader = await serpSearch(`${partNumber} ${mfrName} ${domain}`);
-    if (!broader.length) return null;
-    results.push(...broader);
+  // Try queries in sequence, stop at first that returns results on the target domain
+  const queries = [
+    `"${partNumber}" "${mfrName}" site:${domain}`,
+    `"${partNumber}" site:${domain}`,
+    `"${mpnClean}" site:${domain}`,
+    `${partNumber} ${mfrName} site:${domain}`,
+    `${partNumber} ${mfrName} ${domain}`,
+  ];
+
+  let candidates = [];
+  for (const q of queries) {
+    const results = await serpSearch(q);
+    const onDomain = results.filter(r => {
+      try { return new URL(r.url).hostname.includes(domain.replace("www.", "")); }
+      catch { return false; }
+    });
+    if (onDomain.length) { candidates = onDomain; break; }
+    if (results.length && !candidates.length) candidates = results; // keep as fallback
   }
 
-  // Filter to only results on the correct domain before sending to Claude
-  const onDomain = results.filter(r => {
-    try { return new URL(r.url).hostname.includes(domain.replace("www.", "")); }
-    catch { return false; }
-  });
-
-  const candidates = onDomain.length ? onDomain : results;
+  if (!candidates.length) return null;
 
   const prompt = `You are selecting the best product detail page URL for part number "${partNumber}" from manufacturer "${mfrName}" on ${distName} (${domain}).
 
@@ -172,12 +179,12 @@ ${candidates.slice(0, 5).map((r, i) => `${i+1}. Title: ${r.title}\n   URL: ${r.u
 Select the single best URL that:
 - Is on the ${domain} domain (or a subdomain)
 - Goes directly to a product detail page for part number "${partNumber}"
-- Is NOT a search results page, category page, or unrelated product
+- Is NOT a search results page, category page, or homepage
 
 Respond with ONLY valid JSON, no markdown:
 {"url":"","reason":"","confidence":"high|medium|low"}
 
-If no result is a good PDP match, return: {"url":"","reason":"no PDP found","confidence":"low"}`;
+If no result is a direct PDP, return: {"url":"","reason":"no PDP found","confidence":"low"}`;
 
   try {
     const raw = await callClaude([{ role: "user", content: prompt }], 500);

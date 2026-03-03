@@ -276,6 +276,7 @@ export default function App() {
   const [step, setStep] = useState("discover");
   const [manufacturer, setManufacturer] = useState("");
   const [category, setCategory] = useState("");
+  const [inputPartNumber, setInputPartNumber] = useState("");
   const [discoveredParts, setDiscoveredParts] = useState([]);
   const [discoveredDistributors, setDiscoveredDistributors] = useState([]);
   const [discoverabilityData, setDiscoverabilityData] = useState([]);
@@ -294,14 +295,57 @@ export default function App() {
   const stepIdx = STEPS.indexOf(step);
 
   const runDiscovery = async () => {
-    if (!manufacturer.trim() || !category.trim()) { setError("Enter manufacturer and category."); return; }
+    const hasPart = inputPartNumber.trim().length > 0;
+    const hasCat = category.trim().length > 0;
+    if (!manufacturer.trim() || (!hasPart && !hasCat)) {
+      setError("Enter manufacturer and either a product category or part number.");
+      return;
+    }
     setError(""); setLoading(true); setLog([]);
     setDiscoveredParts([]); setDiscoveredDistributors([]);
     try {
-      addLog("Discovering top parts...");
-      const partsRaw = await callClaude([{ role: "user", content: `You are a product intelligence expert with deep knowledge of B2B manufacturing, electronic components, and industrial distribution.
+      const categoryContext = hasCat ? category.trim() : inputPartNumber.trim();
 
-Identify the top 5 best-selling or most widely distributed parts from manufacturer "${manufacturer}" in the category "${category}".
+      if (hasPart) {
+        // Skip part discovery — user provided the MPN directly
+        addLog(`Using provided part number: ${inputPartNumber.trim()}`);
+        const autopart = {
+          partNumber: inputPartNumber.trim(),
+          name: inputPartNumber.trim(),
+          confidence: "high",
+          reason: "User-provided part number",
+          manufacturerUrl: ""
+        };
+        addLog("Discovering top 10 distributors...");
+        const distRaw = await callClaude([{ role: "user", content: `You are a B2B distribution channel expert.
+
+Identify the top 10 distributors for manufacturer "${manufacturer}" that carry part number "${inputPartNumber.trim()}"${hasCat ? ` in the category "${category.trim()}"` : ""}. Include broadline and specialty distributors. Rank by channel importance.
+
+Use base domain only for domain field: e.g. "digikey.com", "mouser.com", "arrow.com", "newark.com", "rs-online.com", "grainger.com", "alliedelec.com", "galco.com", "tme.eu", "farnell.com", "fastenal.com", "uline.com", "mcmaster.com", "mscdirect.com"
+
+Respond with ONLY a raw JSON array, no markdown:
+[{"name":"","domain":"","confidence":"high|medium|low","relationship":"authorized|broad-catalog|regional","verticalFit":"","rank":1}]` }]);
+
+        const dists = parseJSON(distRaw);
+        addLog(`Found ${dists.length} distributors`);
+        setDiscoveredDistributors(dists);
+        // Auto-select the part and skip the "select" step
+        const data = dists.map(dist => {
+          const registry = DISTRIBUTOR_REGISTRY.find(r => dist.domain?.includes(r.domain.split(".")[0]));
+          const pdpAddressable = registry ? registry.pdpAddressable : false;
+          const note = registry ? registry.note : "URL pattern unknown — will resolve via search";
+          return { ...dist, pdpAddressable, note, url: buildFallbackUrl(dist.domain, autopart.partNumber) };
+        });
+        setSelectedPart(autopart);
+        setDiscoverabilityData(data);
+        setSelectedDistributors([]);
+        setStep("discoverability");
+      } else {
+        // Category-only path — original behavior
+        addLog("Discovering top parts...");
+        const partsRaw = await callClaude([{ role: "user", content: `You are a product intelligence expert with deep knowledge of B2B manufacturing, electronic components, and industrial distribution.
+
+Identify the top 5 best-selling or most widely distributed parts from manufacturer "${manufacturer}" in the category "${categoryContext}".
 
 Criteria: high distributor catalog breadth, industry-standard, high volume. Prefer parts you are highly confident exist and are widely stocked.
 
@@ -310,22 +354,23 @@ Leave manufacturerUrl as empty string.
 Respond with ONLY a raw JSON array, no markdown:
 [{"partNumber":"","name":"","confidence":"high|medium|low","reason":"","manufacturerUrl":""}]` }]);
 
-      addLog("Discovering top 10 distributors...");
-      const distRaw = await callClaude([{ role: "user", content: `You are a B2B distribution channel expert.
+        addLog("Discovering top 10 distributors...");
+        const distRaw = await callClaude([{ role: "user", content: `You are a B2B distribution channel expert.
 
-Identify the top 10 distributors for manufacturer "${manufacturer}" in the category "${category}". Include broadline and specialty distributors. Rank by channel importance.
+Identify the top 10 distributors for manufacturer "${manufacturer}" in the category "${categoryContext}". Include broadline and specialty distributors. Rank by channel importance.
 
 Use base domain only for domain field: e.g. "digikey.com", "mouser.com", "arrow.com", "newark.com", "rs-online.com", "grainger.com", "alliedelec.com", "galco.com", "tme.eu", "farnell.com", "fastenal.com", "uline.com", "mcmaster.com", "mscdirect.com"
 
 Respond with ONLY a raw JSON array, no markdown:
 [{"name":"","domain":"","confidence":"high|medium|low","relationship":"authorized|broad-catalog|regional","verticalFit":"","rank":1}]` }]);
 
-      const parts = parseJSON(partsRaw);
-      const dists = parseJSON(distRaw);
-      addLog(`Found ${parts.length} parts · ${dists.length} distributors`);
-      setDiscoveredParts(parts);
-      setDiscoveredDistributors(dists);
-      setStep("select");
+        const parts = parseJSON(partsRaw);
+        const dists = parseJSON(distRaw);
+        addLog(`Found ${parts.length} parts · ${dists.length} distributors`);
+        setDiscoveredParts(parts);
+        setDiscoveredDistributors(dists);
+        setStep("select");
+      }
     } catch (e) { setError("Discovery failed: " + e.message); }
     setLoading(false);
   };
@@ -794,7 +839,7 @@ Respond ONLY with valid JSON, no markdown:
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
             <h2 className="font-black text-gray-900 text-lg mb-1">Step 1 — Discover</h2>
             <p className="text-sm text-gray-500 mb-5">Identifies top parts and top 10 distributors simultaneously.</p>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4 items-end">
               <div>
                 <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Manufacturer Name</label>
                 <input className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -807,6 +852,14 @@ Respond ONLY with valid JSON, no markdown:
                 <input className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="e.g. circular connectors, coaxial cable"
                   value={category} onChange={e => setCategory(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && runDiscovery()} />
+              </div>
+              <div className="relative">
+                <div className="absolute -left-5 top-1/2 -translate-y-1/2 text-xs font-bold text-gray-400 uppercase hidden md:block">or</div>
+                <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Part Number <span className="text-blue-600 normal-case font-medium">(skip discovery)</span></label>
+                <input className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="e.g. 9841, 2M-F-6GH"
+                  value={inputPartNumber} onChange={e => setInputPartNumber(e.target.value)}
                   onKeyDown={e => e.key === "Enter" && runDiscovery()} />
               </div>
             </div>

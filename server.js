@@ -34,7 +34,22 @@ app.post("/api/search", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Jina AI fallback fetcher — no key required
+// Brightdata Web Unlocker — primary fetcher
+const fetchViaBrightdata = async (url) => {
+  const k = process.env.BRIGHTDATA_API_KEY;
+  if (!k) throw new Error("BRIGHTDATA_API_KEY not set");
+  const r = await fetch("https://api.brightdata.com/request", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${k}` },
+    body: JSON.stringify({ zone: "web_unlocker1", url, format: "raw" })
+  });
+  if (!r.ok) throw new Error(`Brightdata failed: ${r.status}`);
+  const text = await r.text();
+  if (!text || text.length < 200) throw new Error("Brightdata returned empty content");
+  return text;
+};
+
+// Jina AI — fallback if Brightdata not configured
 const fetchViaJina = async (url) => {
   const jinaUrl = `https://r.jina.ai/${url}`;
   const r = await fetch(jinaUrl, {
@@ -46,7 +61,7 @@ const fetchViaJina = async (url) => {
   return text;
 };
 
-// Page reader proxy — tries Firecrawl first, falls back to Jina AI
+// Page reader proxy — Brightdata first, Jina fallback
 app.post("/api/fetch-page", async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: "url required" });
@@ -54,23 +69,12 @@ app.post("/api/fetch-page", async (req, res) => {
     return res.status(400).json({ error: "Cannot fetch Google search pages — URL was not resolved to a PDP" });
   }
 
-  // Try Firecrawl if key is available
-  const k = process.env.FIRECRAWL_API_KEY;
-  if (k) {
+  // Try Brightdata Web Unlocker first
+  if (process.env.BRIGHTDATA_API_KEY) {
     try {
-      const r = await fetch("https://api.firecrawl.dev/v1/scrape", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${k}` },
-        body: JSON.stringify({ url, formats: ["markdown"], onlyMainContent: true, timeout: 20000 })
-      });
-      if (r.ok) {
-        const data = await r.json();
-        const text = data.success ? (data.data?.markdown || "") : "";
-        if (text && text.length >= 200) {
-          return res.json({ content: text.slice(0, 8000), truncated: text.length > 8000, fetcher: "firecrawl" });
-        }
-      }
-    } catch (_) { /* fall through to Jina */ }
+      const text = await fetchViaBrightdata(url);
+      return res.json({ content: text.slice(0, 8000), truncated: text.length > 8000, fetcher: "brightdata" });
+    } catch (e) { console.error("Brightdata failed:", e.message); /* fall through */ }
   }
 
   // Fallback: Jina AI (no key required)
@@ -78,7 +82,7 @@ app.post("/api/fetch-page", async (req, res) => {
     const text = await fetchViaJina(url);
     return res.json({ content: text.slice(0, 8000), truncated: text.length > 8000, fetcher: "jina" });
   } catch (e) {
-    return res.status(502).json({ error: `Both fetchers failed: ${e.message}` });
+    return res.status(502).json({ error: `All fetchers failed: ${e.message}` });
   }
 });
 

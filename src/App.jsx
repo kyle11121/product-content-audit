@@ -30,18 +30,56 @@ const SCORE_COLORS = {
   low: "bg-red-100 text-red-800 border-red-200",
 };
 
+// Agentic-ready is now determined DYNAMICALLY based on whether SerpAPI resolves a direct PDP URL.
+// This registry is only used for fallback search-page URL construction — never for agentic status.
 const DISTRIBUTOR_REGISTRY = [
-  { name: "Digi-Key", domain: "digikey.com", pdpAddressable: true, note: "Direct PDP URL constructable from part number" },
-  { name: "Arrow Electronics", domain: "arrow.com", pdpAddressable: true, note: "Direct PDP URL constructable from part number" },
-  { name: "Mouser Electronics", domain: "mouser.com", pdpAddressable: false, note: "Returns search results page — not directly addressable by part number" },
-  { name: "Newark", domain: "newark.com", pdpAddressable: false, note: "Returns search results page — not directly addressable by part number" },
-  { name: "RS Components", domain: "rs-online.com", pdpAddressable: false, note: "Returns search results page — not directly addressable by part number" },
-  { name: "Grainger", domain: "grainger.com", pdpAddressable: false, note: "Returns search results page — not directly addressable by part number" },
-  { name: "Allied Electronics", domain: "alliedelec.com", pdpAddressable: false, note: "Returns search results page — not directly addressable by part number" },
-  { name: "Galco Industrial", domain: "galco.com", pdpAddressable: false, note: "Returns search results page — not directly addressable by part number" },
-  { name: "TME", domain: "tme.eu", pdpAddressable: false, note: "Returns search results page — not directly addressable by part number" },
-  { name: "Farnell", domain: "farnell.com", pdpAddressable: false, note: "Returns search results page — not directly addressable by part number" },
+  { name: "Digi-Key", domain: "digikey.com" },
+  { name: "Arrow Electronics", domain: "arrow.com" },
+  { name: "Mouser Electronics", domain: "mouser.com" },
+  { name: "Newark", domain: "newark.com" },
+  { name: "RS Components", domain: "rs-online.com" },
+  { name: "Grainger", domain: "grainger.com" },
+  { name: "Allied Electronics", domain: "alliedelec.com" },
+  { name: "Galco Industrial", domain: "galco.com" },
+  { name: "TME", domain: "tme.eu" },
+  { name: "Farnell", domain: "farnell.com" },
+  { name: "WESCO", domain: "wesco.com" },
+  { name: "Anixter", domain: "anixter.com" },
+  { name: "Graybar", domain: "graybar.com" },
+  { name: "Heilind Electronics", domain: "heilind.com" },
+  { name: "Fastenal", domain: "fastenal.com" },
+  { name: "MSC Industrial", domain: "mscdirect.com" },
+  { name: "McMaster-Carr", domain: "mcmaster.com" },
+  { name: "Uline", domain: "uline.com" },
 ];
+
+// Detect whether a URL is a search/category/filter page (NOT a PDP)
+const isSearchPageUrl = (url) => {
+  if (!url) return true;
+  try {
+    const u = new URL(url);
+    const path = u.pathname.toLowerCase();
+    const search = u.search.toLowerCase();
+    const hash = u.hash.toLowerCase();
+    // Search page indicators in path
+    if (/\/(search|filter|catalog|katalog|results|browse)\b/.test(path)) return true;
+    // Search page indicators in query string
+    if (/[?&](q|keywords|searchquery|searchterm|search|st|text|term|query)=/i.test(search)) return true;
+    // Search page indicators in hash
+    if (/#(q=|search|q$)/.test(hash)) return true;
+    // Category pages with no specific product identifier
+    if (/\/c\/?\?/.test(path + search)) return true;
+    return false;
+  } catch { return true; }
+};
+
+// Check if URL likely contains the part number (strong PDP signal)
+const urlContainsPart = (url, partNumber) => {
+  if (!url || !partNumber) return false;
+  const pn = partNumber.toLowerCase().replace(/[-\s]/g, "");
+  const urlLower = url.toLowerCase().replace(/[-\s]/g, "");
+  return urlLower.includes(pn);
+};
 
 // Build a search-page fallback — never a google.com URL
 const buildFallbackUrl = (domain, partNumber) => {
@@ -144,57 +182,79 @@ const serpSearch = async (query) => {
 };
 
 // Use SerpAPI + Claude to find best PDP URL for a distributor
-// Returns: { url, source } where source is "serp" | "fallback"
+// Returns: { url, pdpFound } — pdpFound=true means a real product page was located
 const resolveUrlViaSerpAPI = async (partNumber, mfrName, distName, domain) => {
-  // Normalize MPN variants — strip dashes/spaces for alternate searches
   const mpnClean = partNumber.replace(/[-\s]/g, "");
+  const mpnVariants = [partNumber];
+  if (mpnClean !== partNumber) mpnVariants.push(mpnClean);
+  // Also try with common separator variants
+  if (partNumber.includes("-")) mpnVariants.push(partNumber.replace(/-/g, ""));
 
-  // Try queries in sequence, stop at first that returns results on the target domain
+  // Search strategies — ordered by specificity
   const queries = [
     `"${partNumber}" "${mfrName}" site:${domain}`,
     `"${partNumber}" site:${domain}`,
-    `"${mpnClean}" site:${domain}`,
-    `${partNumber} ${mfrName} site:${domain}`,
-    `${partNumber} ${mfrName} ${domain}`,
+    ...mpnVariants.slice(1).map(v => `"${v}" site:${domain}`),
+    `${partNumber} ${mfrName} product site:${domain}`,
+    `${partNumber} site:${domain}`,
+    // Last resort: broader search without site: restriction
+    `"${partNumber}" "${mfrName}" ${distName}`,
   ];
 
-  let candidates = [];
+  let allCandidates = [];
   for (const q of queries) {
     const results = await serpSearch(q);
     const onDomain = results.filter(r => {
       try { return new URL(r.url).hostname.includes(domain.replace("www.", "")); }
       catch { return false; }
     });
-    if (onDomain.length) { candidates = onDomain; break; }
-    if (results.length && !candidates.length) candidates = results; // keep as fallback
+
+    if (onDomain.length) {
+      // Pre-filter: reject obvious search/category pages by URL pattern
+      const pdpCandidates = onDomain.filter(r => !isSearchPageUrl(r.url));
+      if (pdpCandidates.length) {
+        // Strong candidates — URLs that don't look like search pages
+        allCandidates = pdpCandidates;
+        break;
+      }
+      // If all results are search pages, keep looking with next query
+      if (!allCandidates.length) allCandidates = onDomain;
+    }
   }
 
-  if (!candidates.length) return null;
+  if (!allCandidates.length) return { url: null, pdpFound: false };
 
-  const prompt = `You are selecting the best product detail page URL for part number "${partNumber}" from manufacturer "${mfrName}" on ${distName} (${domain}).
+  // If we already have a strong candidate (contains part number, not a search page), skip Claude
+  const strongMatch = allCandidates.find(r => !isSearchPageUrl(r.url) && urlContainsPart(r.url, partNumber));
+  if (strongMatch) return { url: strongMatch.url, pdpFound: true };
+
+  // Use Claude to pick the best PDP from candidates
+  const prompt = `You are selecting the best product detail page (PDP) URL for part number "${partNumber}" from manufacturer "${mfrName}" on ${distName} (${domain}).
 
 Search results:
-${candidates.slice(0, 5).map((r, i) => `${i+1}. Title: ${r.title}\n   URL: ${r.url}\n   Snippet: ${r.snippet || ""}`).join("\n\n")}
+${allCandidates.slice(0, 5).map((r, i) => `${i+1}. Title: ${r.title}\n   URL: ${r.url}\n   Snippet: ${r.snippet || ""}`).join("\n\n")}
 
-Select the single best URL that:
-- Is on the ${domain} domain (or a subdomain)
-- Goes directly to a product detail page for part number "${partNumber}"
-- Is NOT a search results page, category page, or homepage
+CRITICAL RULES:
+- A PDP is a page dedicated to ONE specific product with specs, description, pricing, etc.
+- REJECT search results pages (URLs containing /search, /filter, ?q=, ?keywords=, ?st=, /c/?)
+- REJECT category or browse pages that list multiple products
+- REJECT homepage or error pages
+- The URL should ideally contain the part number "${partNumber}" or a close variant in the path
 
 Respond with ONLY valid JSON, no markdown:
-{"url":"","reason":"","confidence":"high|medium|low"}
-
-If no result is a direct PDP, return: {"url":"","reason":"no PDP found","confidence":"low"}`;
+{"url":"the_best_pdp_url_or_empty_string","isPDP":true_or_false,"reason":"one sentence"}`;
 
   try {
     const raw = await callClaude([{ role: "user", content: prompt }], 500);
     const clean = raw.replace(/```json|```/g, "").trim();
     const parsed = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1));
-    if (parsed.url && parsed.confidence !== "low") return parsed.url;
-    return null;
+    if (parsed.url && parsed.isPDP && !isSearchPageUrl(parsed.url)) {
+      return { url: parsed.url, pdpFound: true };
+    }
+    return { url: null, pdpFound: false };
   } catch (e) {
     console.warn("Claude URL selection failed:", e.message);
-    return null;
+    return { url: null, pdpFound: false };
   }
 };
 
@@ -341,24 +401,32 @@ Respond with ONLY valid JSON, no markdown:
           manufacturerUrl: inputMfrUrl.trim()
         };
         addLog(`Extracted: ${autopart.partNumber} — ${autopart.name}`);
-        addLog("Discovering top 10 distributors...");
-        const distRaw = await callClaude([{ role: "user", content: `You are a B2B distribution channel expert.
+        addLog("Discovering distributors that carry this part...");
+        const distRaw = await callClaude([{ role: "user", content: `You are a B2B distribution channel expert with deep knowledge of manufacturer-distributor relationships.
 
-Identify the top 10 distributors for manufacturer "${manufacturer}" that carry part number "${autopart.partNumber}"${hasCat ? ` in the category "${category.trim()}"` : ""}. Include broadline and specialty distributors. Rank by channel importance.
+Identify the top 10 distributors most likely to carry part number "${autopart.partNumber}" from manufacturer "${manufacturer}"${hasCat ? ` in the category "${category.trim()}"` : ""}.
 
-Use base domain only for domain field: e.g. "digikey.com", "mouser.com", "arrow.com", "newark.com", "rs-online.com", "grainger.com", "alliedelec.com", "galco.com", "tme.eu", "farnell.com", "fastenal.com", "uline.com", "mcmaster.com", "mscdirect.com"
+CRITICAL RULES:
+- Only include distributors that are KNOWN authorized distributors or major broad-catalog distributors for "${manufacturer}" specifically
+- Do NOT include generic electronics distributors if "${manufacturer}" is not an electronics company
+- Do NOT include distributors that would not reasonably carry this manufacturer's products
+- Consider the manufacturer's actual distribution channel: electrical/datacomm distributors for cable companies, industrial distributors for MRO, etc.
+- Rank by likelihood of actually stocking this specific part number
+
+Use base domain only for domain field. Common domains: "digikey.com", "mouser.com", "arrow.com", "newark.com", "rs-online.com", "grainger.com", "alliedelec.com", "galco.com", "tme.eu", "farnell.com", "fastenal.com", "uline.com", "mcmaster.com", "mscdirect.com", "wesco.com", "anixter.com", "graybar.com", "heilind.com", "rfrconnector.com"
 
 Respond with ONLY a raw JSON array, no markdown:
-[{"name":"","domain":"","confidence":"high|medium|low","relationship":"authorized|broad-catalog|regional","verticalFit":"","rank":1}]` }]);
+[{"name":"","domain":"","confidence":"high|medium|low","relationship":"authorized|broad-catalog|regional","verticalFit":"why this distributor fits this manufacturer","rank":1}]` }]);
         const dists = parseJSON(distRaw);
-        addLog(`Found ${dists.length} distributors`);
+        addLog(`Found ${dists.length} candidate distributors`);
         setDiscoveredDistributors(dists);
-        const data = dists.map(dist => {
-          const registry = DISTRIBUTOR_REGISTRY.find(r => dist.domain?.includes(r.domain.split(".")[0]));
-          const pdpAddressable = registry ? registry.pdpAddressable : false;
-          const note = registry ? registry.note : "URL pattern unknown — will resolve via search";
-          return { ...dist, pdpAddressable, note, url: buildFallbackUrl(dist.domain, autopart.partNumber) };
-        });
+        // Set all as "pending verification" — agentic status determined during URL resolution
+        const data = dists.map(dist => ({
+          ...dist,
+          pdpAddressable: false, // Will be updated during URL resolution
+          note: "Agentic status will be verified during URL resolution",
+          url: buildFallbackUrl(dist.domain, autopart.partNumber)
+        }));
         setSelectedPart(autopart);
         setDiscoverabilityData(data);
         setSelectedDistributors([]);
@@ -374,52 +442,69 @@ Respond with ONLY a raw JSON array, no markdown:
           reason: "User-provided part number",
           manufacturerUrl: ""
         };
-        addLog("Discovering top 10 distributors...");
-        const distRaw = await callClaude([{ role: "user", content: `You are a B2B distribution channel expert.
+        addLog("Discovering distributors that carry this part...");
+        const distRaw = await callClaude([{ role: "user", content: `You are a B2B distribution channel expert with deep knowledge of manufacturer-distributor relationships.
 
-Identify the top 10 distributors for manufacturer "${manufacturer}" that carry part number "${inputPartNumber.trim()}"${hasCat ? ` in the category "${category.trim()}"` : ""}. Include broadline and specialty distributors. Rank by channel importance.
+Identify the top 10 distributors most likely to carry part number "${inputPartNumber.trim()}" from manufacturer "${manufacturer}"${hasCat ? ` in the category "${category.trim()}"` : ""}.
 
-Use base domain only for domain field: e.g. "digikey.com", "mouser.com", "arrow.com", "newark.com", "rs-online.com", "grainger.com", "alliedelec.com", "galco.com", "tme.eu", "farnell.com", "fastenal.com", "uline.com", "mcmaster.com", "mscdirect.com"
+CRITICAL RULES:
+- Only include distributors that are KNOWN authorized distributors or major broad-catalog distributors for "${manufacturer}" specifically
+- Do NOT include generic electronics distributors if "${manufacturer}" is not an electronics company
+- Do NOT include distributors that would not reasonably carry this manufacturer's products
+- Consider the manufacturer's actual distribution channel: electrical/datacomm distributors for cable companies, industrial distributors for MRO, etc.
+- Rank by likelihood of actually stocking this specific part number
+
+Use base domain only for domain field. Common domains: "digikey.com", "mouser.com", "arrow.com", "newark.com", "rs-online.com", "grainger.com", "alliedelec.com", "galco.com", "tme.eu", "farnell.com", "fastenal.com", "uline.com", "mcmaster.com", "mscdirect.com", "wesco.com", "anixter.com", "graybar.com", "heilind.com", "rfrconnector.com"
 
 Respond with ONLY a raw JSON array, no markdown:
-[{"name":"","domain":"","confidence":"high|medium|low","relationship":"authorized|broad-catalog|regional","verticalFit":"","rank":1}]` }]);
+[{"name":"","domain":"","confidence":"high|medium|low","relationship":"authorized|broad-catalog|regional","verticalFit":"why this distributor fits this manufacturer","rank":1}]` }]);
         const dists = parseJSON(distRaw);
-        addLog(`Found ${dists.length} distributors`);
+        addLog(`Found ${dists.length} candidate distributors`);
         setDiscoveredDistributors(dists);
-        const data = dists.map(dist => {
-          const registry = DISTRIBUTOR_REGISTRY.find(r => dist.domain?.includes(r.domain.split(".")[0]));
-          const pdpAddressable = registry ? registry.pdpAddressable : false;
-          const note = registry ? registry.note : "URL pattern unknown — will resolve via search";
-          return { ...dist, pdpAddressable, note, url: buildFallbackUrl(dist.domain, autopart.partNumber) };
-        });
+        const data = dists.map(dist => ({
+          ...dist,
+          pdpAddressable: false, // Will be updated during URL resolution
+          note: "Agentic status will be verified during URL resolution",
+          url: buildFallbackUrl(dist.domain, autopart.partNumber)
+        }));
         setSelectedPart(autopart);
         setDiscoverabilityData(data);
         setSelectedDistributors([]);
         setStep("discoverability");
 
       } else {
-        // Category-only path — original behavior
+        // Category-only path — discover parts and distributors
         addLog("Discovering top parts...");
-        const partsRaw = await callClaude([{ role: "user", content: `You are a product intelligence expert with deep knowledge of B2B manufacturing, electronic components, and industrial distribution.
+        const partsRaw = await callClaude([{ role: "user", content: `You are a product intelligence expert with deep knowledge of B2B manufacturing and industrial distribution.
 
 Identify the top 5 best-selling or most widely distributed parts from manufacturer "${manufacturer}" in the category "${category.trim()}".
 
-Criteria: high distributor catalog breadth, industry-standard, high volume. Prefer parts you are highly confident exist and are widely stocked.
+CRITICAL RULES:
+- Only include part numbers you are HIGHLY CONFIDENT actually exist in ${manufacturer}'s catalog
+- These should be flagship or high-volume parts, not obscure variants
+- Use the EXACT manufacturer part number format (MPN), not distributor-specific SKUs
+- If you're not confident about a part number, use "medium" or "low" confidence and explain why
 
 Leave manufacturerUrl as empty string.
 
 Respond with ONLY a raw JSON array, no markdown:
-[{"partNumber":"","name":"","confidence":"high|medium|low","reason":"","manufacturerUrl":""}]` }]);
+[{"partNumber":"","name":"","confidence":"high|medium|low","reason":"why this is a top part","manufacturerUrl":""}]` }]);
 
-        addLog("Discovering top 10 distributors...");
-        const distRaw = await callClaude([{ role: "user", content: `You are a B2B distribution channel expert.
+        addLog("Discovering distributors for this manufacturer...");
+        const distRaw = await callClaude([{ role: "user", content: `You are a B2B distribution channel expert with deep knowledge of manufacturer-distributor relationships.
 
-Identify the top 10 distributors for manufacturer "${manufacturer}" in the category "${category.trim()}". Include broadline and specialty distributors. Rank by channel importance.
+Identify the top 10 distributors most likely to carry "${manufacturer}" products in the category "${category.trim()}".
 
-Use base domain only for domain field: e.g. "digikey.com", "mouser.com", "arrow.com", "newark.com", "rs-online.com", "grainger.com", "alliedelec.com", "galco.com", "tme.eu", "farnell.com", "fastenal.com", "uline.com", "mcmaster.com", "mscdirect.com"
+CRITICAL RULES:
+- Only include distributors that are KNOWN authorized distributors or major broad-catalog distributors for "${manufacturer}" specifically
+- Do NOT include generic electronics distributors if "${manufacturer}" is not an electronics company
+- Consider the manufacturer's actual distribution channel
+- Rank by likelihood of actually stocking ${manufacturer} products in this category
+
+Use base domain only for domain field. Common domains: "digikey.com", "mouser.com", "arrow.com", "newark.com", "rs-online.com", "grainger.com", "alliedelec.com", "galco.com", "tme.eu", "farnell.com", "fastenal.com", "uline.com", "mcmaster.com", "mscdirect.com", "wesco.com", "anixter.com", "graybar.com", "heilind.com"
 
 Respond with ONLY a raw JSON array, no markdown:
-[{"name":"","domain":"","confidence":"high|medium|low","relationship":"authorized|broad-catalog|regional","verticalFit":"","rank":1}]` }]);
+[{"name":"","domain":"","confidence":"high|medium|low","relationship":"authorized|broad-catalog|regional","verticalFit":"why this distributor fits this manufacturer","rank":1}]` }]);
 
         const parts = parseJSON(partsRaw);
         const dists = parseJSON(distRaw);
@@ -434,12 +519,12 @@ Respond with ONLY a raw JSON array, no markdown:
 
   const selectPart = (part) => {
     setSelectedPart(part);
-    const data = discoveredDistributors.map(dist => {
-      const registry = DISTRIBUTOR_REGISTRY.find(r => dist.domain?.includes(r.domain.split(".")[0]));
-      const pdpAddressable = registry ? registry.pdpAddressable : false;
-      const note = registry ? registry.note : "URL pattern unknown — will resolve via search";
-      return { ...dist, pdpAddressable, note, url: buildFallbackUrl(dist.domain, part.partNumber) };
-    });
+    const data = discoveredDistributors.map(dist => ({
+      ...dist,
+      pdpAddressable: false, // Will be updated during URL resolution
+      note: "Agentic status will be verified during URL resolution",
+      url: buildFallbackUrl(dist.domain, part.partNumber)
+    }));
     setDiscoverabilityData(data);
     setSelectedDistributors([]);
     setStep("discoverability");
@@ -462,10 +547,9 @@ Respond with ONLY a raw JSON array, no markdown:
     const mfrUrl = resolveManufacturerUrl(manufacturer, selectedPart);
     const urlMap = { manufacturer: mfrUrl };
     const nameMap = { manufacturer };
-    // Start all as "resolving" — nothing gets "resolved" until SerpAPI confirms
     const statusMap = { manufacturer: "resolving" };
     selectedDistributors.forEach((d, i) => {
-      urlMap[`dist${i+1}`] = buildFallbackUrl(d.domain, selectedPart.partNumber);
+      urlMap[`dist${i+1}`] = ""; // Don't pre-fill with search page URLs
       nameMap[`dist${i+1}`] = d.name;
       statusMap[`dist${i+1}`] = "resolving";
     });
@@ -474,7 +558,7 @@ Respond with ONLY a raw JSON array, no markdown:
     setUrlStatus(statusMap);
     setStep("configure");
 
-    // Resolve manufacturer URL — use Claude to determine correct domain for unknown manufacturers
+    // Resolve manufacturer URL
     const m = manufacturer.toLowerCase().replace(/[^a-z0-9]/g, "");
     const isKnownMfr = !!MFR_DOMAINS[m] || Object.entries(MFR_DOMAINS).some(([k]) => {
       const nk = k.replace(/[^a-z0-9]/g, "");
@@ -494,25 +578,39 @@ Respond with ONLY a raw JSON array, no markdown:
         mfrDomain = m + ".com";
       }
     }
-    const resolvedMfr = await resolveUrlViaSerpAPI(selectedPart.partNumber, manufacturer, manufacturer, mfrDomain);
-    if (resolvedMfr) {
-      setUrls(u => ({ ...u, manufacturer: resolvedMfr }));
+    const mfrResult = await resolveUrlViaSerpAPI(selectedPart.partNumber, manufacturer, manufacturer, mfrDomain);
+    if (mfrResult.pdpFound && mfrResult.url) {
+      setUrls(u => ({ ...u, manufacturer: mfrResult.url }));
       setUrlStatus(s => ({ ...s, manufacturer: "resolved" }));
     } else {
-      // Keep the known-pattern URL but mark resolved (it's the best we have)
-      setUrlStatus(s => ({ ...s, manufacturer: mfrUrl.includes("google.com") ? "fallback" : "resolved" }));
+      // Keep the known-pattern URL but mark as fallback
+      setUrlStatus(s => ({ ...s, manufacturer: mfrUrl.includes("google.com") ? "fallback" : (isSearchPageUrl(mfrUrl) ? "fallback" : "resolved") }));
     }
 
     // Resolve each distributor via SerpAPI in parallel
+    // Also update agentic-ready status based on whether we found a real PDP
     await Promise.all(selectedDistributors.map(async (d, i) => {
       const key = `dist${i+1}`;
-      const resolved = await resolveUrlViaSerpAPI(selectedPart.partNumber, manufacturer, d.name, d.domain);
-      if (resolved) {
-        setUrls(u => ({ ...u, [key]: resolved }));
+      addLog(`Resolving PDP for ${d.name}...`);
+      const result = await resolveUrlViaSerpAPI(selectedPart.partNumber, manufacturer, d.name, d.domain);
+      if (result.pdpFound && result.url) {
+        setUrls(u => ({ ...u, [key]: result.url }));
         setUrlStatus(s => ({ ...s, [key]: "resolved" }));
+        // Update agentic-ready status — this distributor has a discoverable PDP
+        setDiscoverabilityData(prev => prev.map(dd =>
+          dd.name === d.name ? { ...dd, pdpAddressable: true, note: "Direct PDP URL found via search — agentic agents can discover this product" } : dd
+        ));
+        addLog(`✓ ${d.name} — PDP found`);
       } else {
-        // Fallback = distributor search page on their own domain (never google.com)
+        // No PDP found — show the search page as fallback but mark clearly
+        const fallbackUrl = buildFallbackUrl(d.domain, selectedPart.partNumber);
+        setUrls(u => ({ ...u, [key]: fallbackUrl }));
         setUrlStatus(s => ({ ...s, [key]: "fallback" }));
+        // Update agentic-ready status — no discoverable PDP
+        setDiscoverabilityData(prev => prev.map(dd =>
+          dd.name === d.name ? { ...dd, pdpAddressable: false, note: `No product detail page found for ${selectedPart.partNumber} — distributor may not carry this part or page is not indexed` } : dd
+        ));
+        addLog(`⚠ ${d.name} — no PDP found, using search page fallback`);
       }
     }));
   };
@@ -983,7 +1081,7 @@ Respond ONLY with valid JSON, no markdown:
               <div className="text-sm text-blue-700">{selectedPart?.name}</div>
             </div>
             <div className="bg-gray-900 text-white rounded-lg p-4 mb-4 text-sm">
-              <span className="font-bold">Agentic discoverability:</span> AI procurement agents query part numbers directly via URL. Distributors that return search pages instead of product pages are <span className="text-yellow-400 font-bold">not agentic-ready</span> — this creates friction in automated procurement workflows, AI-powered sourcing tools, and structured data integrations.
+              <span className="font-bold">Agentic discoverability:</span> AI procurement agents query part numbers directly via URL. Agentic-ready status is <span className="text-yellow-400 font-bold">verified during URL resolution</span> — distributors where a direct product page is found are marked ready; those that only return search pages create friction in automated procurement workflows.
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
               {discoverabilityData.map((d, i) => {

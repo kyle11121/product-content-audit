@@ -45,18 +45,52 @@ const htmlToText = (html) => {
     .trim();
 };
 
+// Detect Cloudflare challenge / bot block pages
+const isBlockedPage = (html) => {
+  const lower = html.toLowerCase();
+  return (
+    lower.includes("checking if the site connection is secure") ||
+    lower.includes("just a moment...") ||
+    lower.includes("cf-browser-verification") ||
+    lower.includes("attention required! | cloudflare") ||
+    lower.includes("ray id:") && lower.includes("cloudflare") ||
+    lower.includes("403 forbidden") ||
+    lower.includes("access denied") ||
+    (lower.includes("captcha") && html.length < 5000)
+  );
+};
+
 // Brightdata Web Unlocker — primary fetcher
 const fetchViaBrightdata = async (url) => {
   const k = process.env.BRIGHTDATA_API_KEY;
   if (!k) throw new Error("BRIGHTDATA_API_KEY not set");
+
+  // Determine if this is a known Cloudflare-heavy site that needs extra handling
+  const cfHeavy = ["digikey.com", "newark.com", "farnell.com", "element14.com"].some(d => url.includes(d));
+
+  const payload = {
+    zone: "web_unlocker1",
+    url,
+    format: "raw",
+    render_js: true,
+    country: "us",
+  };
+  // For Cloudflare-heavy sites, add extra options
+  if (cfHeavy) {
+    payload.render_js = true;
+    payload.wait_for_selector = "body";
+    payload.timeout = 30000;
+  }
+
   const r = await fetch("https://api.brightdata.com/request", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${k}` },
-    body: JSON.stringify({ zone: "web_unlocker1", url, format: "raw", render_js: true })
+    body: JSON.stringify(payload)
   });
   if (!r.ok) throw new Error(`Brightdata failed: ${r.status}`);
   const html = await r.text();
   if (!html || html.length < 200) throw new Error("Brightdata returned empty content");
+  if (isBlockedPage(html)) throw new Error("Brightdata returned a Cloudflare challenge page — site is blocking automated access");
   const text = htmlToText(html);
   if (text.length < 100) throw new Error("Brightdata page had no readable text content");
   return text;
@@ -66,11 +100,18 @@ const fetchViaBrightdata = async (url) => {
 const fetchViaJina = async (url) => {
   const jinaUrl = `https://r.jina.ai/${url}`;
   const r = await fetch(jinaUrl, {
-    headers: { "Accept": "text/plain", "X-Return-Format": "text", "X-Timeout": "15" }
+    headers: { "Accept": "text/plain", "X-Return-Format": "text", "X-Timeout": "20" }
   });
   if (!r.ok) throw new Error(`Jina fetch failed: ${r.status}`);
   const text = await r.text();
   if (!text || text.length < 200) throw new Error("Jina returned empty content");
+  // Check for common block indicators in text output
+  const lower = text.toLowerCase();
+  if (lower.includes("access denied") && text.length < 1000) throw new Error("Jina returned an access denied page");
+  if (lower.includes("403 forbidden") && text.length < 1000) throw new Error("Jina returned a 403 page");
+  if (lower.includes("checking if the site connection is secure") || lower.includes("just a moment")) {
+    throw new Error("Jina returned a Cloudflare challenge page");
+  }
   return text;
 };
 

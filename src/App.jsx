@@ -289,33 +289,39 @@ const discoverDistributorsViaSearch = async (partNumber, productName, mfrName, a
   // Collect all unique URLs from search results
   const seenDomains = new Map(); // domain -> { name, url, title, pdpFound }
 
+  let totalResults = 0;
+  let filteredMfr = 0, filteredGeneric = 0, filteredAggregator = 0, filteredTLD = 0, filteredRegion = 0;
+
   for (const q of queries) {
     addLogFn(`  Searching: ${q}`);
     const results = await serpSearch(q);
+    totalResults += results.length;
     for (const r of results) {
       try {
         const hostname = new URL(r.url).hostname.replace("www.", "");
-        // Skip manufacturer's own site, Google, Amazon, eBay, and aggregator/search engines (not real distributors)
-        if (hostname.includes(mfrName.toLowerCase().replace(/[^a-z0-9]/g, ""))) continue;
-        if (["google.com", "amazon.com", "ebay.com", "wikipedia.org", "youtube.com", "reddit.com", "linkedin.com"].some(d => hostname.includes(d))) continue;
+        // Skip manufacturer's own site
+        const mfrSlug = mfrName.toLowerCase().replace(/[^a-z0-9]/g, "");
+        if (hostname.includes(mfrSlug)) { filteredMfr++; continue; }
+        // Skip generic non-distributor sites
+        if (["google.com", "amazon.com", "ebay.com", "wikipedia.org", "youtube.com", "reddit.com", "linkedin.com"].some(d => hostname.includes(d))) { filteredGeneric++; continue; }
         // Exclude parts search aggregators and datasheet sites — not real distributors
         if (["octopart.com", "findchips.com", "partstack.com", "traceparts.com", "3dcontentcentral.com",
              "componentsearchengine.com", "snapeda.com", "ultralibrarian.com", "samacsys.com",
              "trustedparts.com", "questcomp.com", "partstat.com", "bom.com", "oemsecrets.com",
              "electronic-parts-directory.com", "datasheets.com", "datasheet.live",
              "everythingpe.com", "componentshub.com", "sourcengine.com", "alibaba.com", "aliexpress.com"
-        ].some(d => hostname.includes(d))) continue;
+        ].some(d => hostname.includes(d))) { filteredAggregator++; continue; }
         // Catch all alldatasheet variants (alldatasheet.com, alldatasheetde.com, etc.)
-        if (hostname.includes("alldatasheet")) continue;
+        if (hostname.includes("alldatasheet")) { filteredAggregator++; continue; }
         // Filter to North America only — skip international/regional storefronts
         // Reject country-code TLDs (except .com, .net, .org, .us, .ca, .io, .co)
         const tld = hostname.split(".").pop();
         const allowedTLDs = ["com", "net", "org", "us", "ca", "io", "co", "edu", "gov"];
-        if (!allowedTLDs.includes(tld)) continue;
+        if (!allowedTLDs.includes(tld)) { filteredTLD++; continue; }
         // Reject regional subdomains (in.rsdelivers.com, africa.rsdelivers.com, mo.rsdelivers.com, etc.)
         const parts = hostname.split(".");
         const regionPrefixes = ["in", "africa", "mo", "it", "de", "fr", "uk", "eu", "au", "sg", "jp", "cn", "kr", "tw", "hk", "br", "mx", "za", "nz", "th", "my", "ph", "vn", "id"];
-        if (parts.length >= 3 && regionPrefixes.includes(parts[0])) continue;
+        if (parts.length >= 3 && regionPrefixes.includes(parts[0])) { filteredRegion++; continue; }
 
         if (!seenDomains.has(hostname)) {
           const isPDP = !isSearchPageUrl(r.url);
@@ -349,6 +355,7 @@ const discoverDistributorsViaSearch = async (partNumber, productName, mfrName, a
       return 0;
     });
 
+  addLogFn(`Search stats: ${totalResults} total results, filtered: ${filteredMfr} mfr, ${filteredGeneric} generic, ${filteredAggregator} aggregator, ${filteredTLD} intl TLD, ${filteredRegion} regional`);
   addLogFn(`Found ${found.length} distributor sites in search results (${found.filter(f => f.pdpFound).length} with confirmed PDPs)`);
   return found;
 };

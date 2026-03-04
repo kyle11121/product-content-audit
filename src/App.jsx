@@ -534,6 +534,7 @@ Respond with ONLY valid JSON, no markdown:
         addLog(`Extracted: ${autopart.partNumber} — ${autopart.name}`);
         // SEARCH-FIRST: find distributors that actually carry this part via Google
         const searchResults = await discoverDistributorsViaSearch(autopart.partNumber, autopart.name, manufacturer, addLog);
+        if (!searchResults.length) throw new Error("No distributors found in search results. Try a different part number or add a product category.");
         const classified = await classifyDistributors(searchResults, manufacturer, autopart.partNumber);
         addLog(`Classified ${classified.length} distributors`);
         setDiscoveredDistributors(classified);
@@ -570,6 +571,7 @@ Respond with ONLY valid JSON, no markdown:
         addLog(`Product: ${autopart.partNumber} — ${autopart.name}`);
         // SEARCH-FIRST: find distributors that actually carry this part via Google
         const searchResults = await discoverDistributorsViaSearch(autopart.partNumber, productName, manufacturer, addLog);
+        if (!searchResults.length) throw new Error("No distributors found in search results. Try adding a product category or check the part number.");
         const classified = await classifyDistributors(searchResults, manufacturer, autopart.partNumber);
         addLog(`Classified ${classified.length} distributors`);
         setDiscoveredDistributors(classified);
@@ -620,6 +622,11 @@ Respond with ONLY a raw JSON array, no markdown:
     addLog(`Selected: ${part.partNumber} — ${part.name}`);
     // SEARCH-FIRST: find distributors that actually carry this specific part via Google
     const searchResults = await discoverDistributorsViaSearch(part.partNumber, part.name, manufacturer, addLog);
+    if (!searchResults.length) {
+      setError("No distributors found in search results for this part. Try a different part.");
+      setLoading(false);
+      return;
+    }
     const classified = await classifyDistributors(searchResults, manufacturer, part.partNumber);
     addLog(`Classified ${classified.length} distributors`);
     setDiscoveredDistributors(classified);

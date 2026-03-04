@@ -962,7 +962,7 @@ Respond ONLY with valid JSON, no markdown:
                 <div className="font-bold text-gray-800 text-sm">{r.siteName}</div>
                 <div className="text-xs text-gray-400 mb-1">{r.role}</div>
                 <div className="flex flex-wrap gap-1 mb-2">
-                  {discData && <AgenticBadge pass={discData.pdpAddressable} />}
+                  {discData && <AgenticBadge pass={discData.pdpAddressable && !r.blocked} />}
                   <SourceBadge source={r.contentSource} />
                 </div>
                 {r.blocked ? (
@@ -1026,39 +1026,56 @@ Respond ONLY with valid JSON, no markdown:
     );
   };
 
-  const renderAgenticTab = () => (
+  const renderAgenticTab = () => {
+    // Merge discoverability data with audit results — blocked pages are NOT agentic-ready
+    const all = results ? [results.manufacturer, ...(results.distributors || [])] : [];
+    const enriched = discoverabilityData.map(d => {
+      const auditResult = all.find(r => r.siteName === d.name);
+      const isBlocked = auditResult?.blocked;
+      const trueAgentic = d.pdpAddressable && !isBlocked;
+      return { ...d, trueAgentic, isBlocked };
+    });
+    const failCount = enriched.filter(d => !d.trueAgentic).length;
+
+    return (
     <div className="space-y-4">
       <div className="bg-gray-900 rounded-xl p-5 text-white mb-4">
         <h3 className="font-black text-lg mb-1">Agentic Search Discoverability</h3>
-        <p className="text-gray-400 text-sm">AI agents and procurement bots query part numbers directly via URL. Distributors that return search pages instead of product pages creates friction in automated procurement workflows, AI-powered sourcing tools, and structured data integrations.</p>
+        <p className="text-gray-400 text-sm">AI agents and procurement bots query part numbers directly via URL. A distributor is agentic-ready only if both (1) a direct PDP URL is discoverable via search and (2) the page content is actually accessible — not blocked by Cloudflare or bot detection.</p>
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {discoverabilityData.map((d, i) => (
-          <div key={i} className={`rounded-lg border-2 p-4 ${d.pdpAddressable ? "border-green-200 bg-green-50" : "border-yellow-200 bg-yellow-50"}`}>
+        {enriched.map((d, i) => (
+          <div key={i} className={`rounded-lg border-2 p-4 ${d.trueAgentic ? "border-green-200 bg-green-50" : "border-red-200 bg-red-50"}`}>
             <div className="flex items-center justify-between mb-2">
               <span className="font-bold text-gray-900">{d.name}</span>
-              <AgenticBadge pass={d.pdpAddressable} />
+              <AgenticBadge pass={d.trueAgentic} />
             </div>
             <div className="text-xs text-gray-500 mb-1">{d.domain} · <span className="capitalize">{d.relationship}</span></div>
-            <div className={`text-xs font-medium ${d.pdpAddressable ? "text-green-700" : "text-yellow-700"}`}>{d.note}</div>
-            {!d.pdpAddressable && (
-              <div className="mt-2 text-xs text-yellow-700 bg-yellow-100 rounded p-2">
-                ⚠ Automated procurement agents cannot directly retrieve product data for this part without an intermediate search step — creating friction that increases as agentic buying accelerates.
+            {d.isBlocked ? (
+              <div className="mt-2 text-xs text-red-700 bg-red-100 rounded p-2">
+                ✗ Page is blocked by bot detection — an AI agent cannot read this product page even though a URL exists. This distributor is invisible to agentic procurement.
               </div>
+            ) : !d.pdpAddressable ? (
+              <div className="mt-2 text-xs text-yellow-700 bg-yellow-100 rounded p-2">
+                ⚠ No direct PDP URL discoverable via search — automated procurement agents cannot find this product without an intermediate search step.
+              </div>
+            ) : (
+              <div className={`text-xs font-medium text-green-700`}>{d.note}</div>
             )}
           </div>
         ))}
       </div>
       <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
         <div className="font-bold text-orange-900 mb-1">
-          {discoverabilityData.filter(d => !d.pdpAddressable).length} of {discoverabilityData.length} distributors require an intermediate search step for agentic access
+          {failCount} of {enriched.length} distributors are not fully agentic-accessible
         </div>
         <div className="text-sm text-orange-800">
-          As AI-powered procurement accelerates, parts that aren't directly addressable by part number will be systematically excluded from agentic sourcing workflows — regardless of content quality on the page.
+          As AI-powered procurement accelerates, parts that aren't directly addressable and readable by part number will be systematically excluded from agentic sourcing workflows — regardless of content quality on the page.
         </div>
       </div>
     </div>
-  );
+    );
+  };
 
   const renderMatrix = () => {
     if (!results) return null;

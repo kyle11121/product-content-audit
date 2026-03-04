@@ -69,18 +69,25 @@ const htmlToText = (html) => {
 };
 
 // Detect Cloudflare challenge / bot block pages
+// ONLY flag as blocked if the page is clearly a challenge/block page, not real content
 const isBlockedPage = (html) => {
   const lower = html.toLowerCase();
-  return (
-    lower.includes("checking if the site connection is secure") ||
-    lower.includes("just a moment...") ||
-    lower.includes("cf-browser-verification") ||
-    lower.includes("attention required! | cloudflare") ||
-    lower.includes("ray id:") && lower.includes("cloudflare") ||
-    lower.includes("403 forbidden") ||
-    lower.includes("access denied") ||
-    (lower.includes("captcha") && html.length < 5000)
-  );
+  // Short pages with block indicators are almost certainly challenges
+  const isShort = html.length < 5000;
+  // Definitive Cloudflare challenge markers
+  if (lower.includes("checking if the site connection is secure")) return true;
+  if (lower.includes("cf-browser-verification")) return true;
+  if (lower.includes("attention required! | cloudflare")) return true;
+  // "Just a moment" is Cloudflare's interstitial — but only on short pages
+  if (lower.includes("just a moment...") && isShort) return true;
+  // These are only block indicators on very short pages (under 2KB)
+  // Real product pages can contain "access denied" or "403" in content
+  if (html.length < 2000) {
+    if (lower.includes("403 forbidden")) return true;
+    if (lower.includes("access denied")) return true;
+  }
+  if (lower.includes("captcha") && isShort) return true;
+  return false;
 };
 
 // Brightdata Web Unlocker — primary fetcher
@@ -112,9 +119,11 @@ const fetchViaBrightdata = async (url) => {
   });
   if (!r.ok) throw new Error(`Brightdata failed: ${r.status}`);
   const html = await r.text();
+  console.log(`[brightdata] url=${url} status=${r.status} htmlLen=${html.length}`);
   if (!html || html.length < 200) throw new Error("Brightdata returned empty content");
-  if (isBlockedPage(html)) throw new Error("Brightdata returned a Cloudflare challenge page — site is blocking automated access");
+  if (isBlockedPage(html)) throw new Error("Brightdata returned a blocked page (challenge/captcha detected)");
   const text = htmlToText(html);
+  console.log(`[brightdata] textLen=${text.length} preview=${text.slice(0, 100)}`);
   if (text.length < 100) throw new Error("Brightdata page had no readable text content");
   return text;
 };

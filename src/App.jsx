@@ -156,8 +156,12 @@ const callClaude = async (messages, maxTokens = 2000) => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: maxTokens, messages }),
   });
-  const data = await res.json();
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); }
+  catch { throw new Error(`Claude API returned non-JSON (status ${res.status}): ${text.slice(0, 120)}`); }
   if (data.error) throw new Error(typeof data.error === "object" ? JSON.stringify(data.error) : data.error);
+  if (!data.content) throw new Error(`Claude API returned unexpected shape: ${JSON.stringify(data).slice(0, 200)}`);
   return data.content.filter(b => b.type === "text").map(b => b.text).join("");
 };
 
@@ -432,7 +436,10 @@ const fetchPageContent = async (url) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url }),
     });
-    const data = await res.json();
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); }
+    catch { console.warn("fetch-page returned non-JSON:", text.slice(0, 120)); return null; }
     if (data.error) return null;
     return data.content;
   } catch { return null; }
@@ -850,9 +857,14 @@ Respond ONLY with valid JSON, no markdown:
         const siteName = names[key];
         const role = key === "manufacturer" ? "manufacturer" : "distributor";
         addLog(`→ Auditing ${siteName}...`);
-        const result = await auditPage(urls[key], siteName, role);
-        all.push(result);
-        addLog(`✓ ${siteName} — ${result.overallScore}/100 [${result.contentSource}]`);
+        try {
+          const result = await auditPage(urls[key], siteName, role);
+          all.push(result);
+          addLog(`✓ ${siteName} — ${result.blocked ? "Blocked" : `${result.overallScore}/100`} [${result.contentSource}]`);
+        } catch (pageErr) {
+          addLog(`✗ ${siteName} — error: ${pageErr.message}`);
+          all.push({ siteName, role, url: urls[key], contentSource: "error", overallScore: null, topGaps: [], summary: "", blocked: true, blockedReason: pageErr.message, fields: {} });
+        }
       }
       setResults({ manufacturer: all[0], distributors: all.slice(1) });
       setStep("results");

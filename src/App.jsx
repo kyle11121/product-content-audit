@@ -450,7 +450,7 @@ const exportCSV = (results, partNumber, manufacturer, category, discoverabilityD
     ["=== CONTENT QUALITY SCORES ==="],
     ["", ...all.map(r => r.siteName)],
     ["Overall Score", ...all.map(r => `${r.overallScore}/100`)],
-    ["Content Source", ...all.map(r => r.contentSource === "live" ? "Live page" : "Training data")],
+    ["Content Source", ...all.map(r => r.contentSource === "live" ? "Live page" : "Blocked")],
     ["Summary", ...all.map(r => `"${r.summary.replace(/"/g, '""')}"`),],
     [],
     ["Field", ...all.map(r => `${r.siteName} Score`), ...all.map(r => `${r.siteName} Value`)],
@@ -832,7 +832,7 @@ Respond ONLY with valid JSON, no markdown:
         addLog(`→ Auditing ${siteName}...`);
         const result = await auditPage(urls[key], siteName, role);
         all.push(result);
-        addLog(`✓ ${siteName} — ${result.overallScore}/100 [${result.contentSource === "live" ? "live page" : "training data"}]`);
+        addLog(`✓ ${siteName} — ${result.overallScore}/100 [${result.contentSource}]`);
       }
       setResults({ manufacturer: all[0], distributors: all.slice(1) });
       setStep("results");

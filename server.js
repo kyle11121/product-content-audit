@@ -47,6 +47,7 @@ app.post("/api/search", async (req, res) => {
       body: JSON.stringify({ q: query, num: 20, gl: "us", hl: "en" })
     });
     const data = await r.json();
+    console.log(`[search] q="${query}" status=${r.status} organic=${(data.organic||[]).length} message=${data.message||"none"}`);
     if (data.message) return res.status(502).json({ error: `Serper: ${data.message}` });
     const results = (data.organic || []).map(r => ({ title: r.title, url: r.link, snippet: r.snippet || "" }));
 

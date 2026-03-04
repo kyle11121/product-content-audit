@@ -162,7 +162,7 @@ const callClaude = async (messages, maxTokens = 2000) => {
 };
 
 // Search Google via Custom Search API — returns [] on any failure
-const serpSearch = async (query) => {
+const serpSearch = async (query, addLogFn) => {
   try {
     const res = await fetch("/api/search", {
       method: "POST",
@@ -171,12 +171,16 @@ const serpSearch = async (query) => {
     });
     const data = await res.json();
     if (data.error) {
-      console.warn("Google CSE error:", data.error);
+      console.warn("Search API error:", data.error);
+      if (addLogFn) addLogFn(`  ⚠ Search error: ${data.error}`);
       return [];
     }
-    return data.results || [];
+    const results = data.results || [];
+    if (addLogFn && results.length === 0) addLogFn(`  (0 results)`);
+    return results;
   } catch (e) {
     console.warn("serpSearch fetch failed:", e.message);
+    if (addLogFn) addLogFn(`  ⚠ Search failed: ${e.message}`);
     return [];
   }
 };
@@ -294,7 +298,7 @@ const discoverDistributorsViaSearch = async (partNumber, productName, mfrName, a
 
   for (const q of queries) {
     addLogFn(`  Searching: ${q}`);
-    const results = await serpSearch(q);
+    const results = await serpSearch(q, addLogFn);
     totalResults += results.length;
     for (const r of results) {
       try {

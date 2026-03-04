@@ -264,15 +264,24 @@ Respond with ONLY valid JSON, no markdown:
 // Search-first distributor discovery: search Google for the part, see which distributor sites have PDPs
 // Returns array of { name, domain, url, pdpFound, source } — only distributors that actually show up in search
 const discoverDistributorsViaSearch = async (partNumber, productName, mfrName, addLogFn) => {
-  // Build search queries — use both MPN and product name
+  // Normalize MPN variants — strip dashes/spaces for alternate searches
+  const mpnClean = partNumber.replace(/[-\s]/g, "");
+  const mpnDifferent = mpnClean !== partNumber;
+
+  // Build search queries — exact first, then progressively broader
   const queries = [
     `"${partNumber}" "${mfrName}" buy`,
-    `"${partNumber}" ${productName ? `"${productName}"` : ""} distributor`,
-    `"${partNumber}" ${mfrName} price availability`,
+    `"${partNumber}" ${mfrName} distributor`,
+    ...(mpnDifferent ? [`"${mpnClean}" ${mfrName} distributor`] : []),
+    `${partNumber} ${mfrName} price availability`,
+    `${partNumber} ${mfrName} buy`,
     ...(productName && productName !== partNumber ? [
       `"${productName}" "${mfrName}" distributor`,
       `${productName} ${mfrName} buy online`,
+      `${partNumber} ${productName} distributor`,
     ] : []),
+    // Last resort — just the part number with "buy" or "datasheet"
+    `${partNumber} buy distributor`,
   ].filter(q => q.trim());
 
   addLogFn("Searching Google for distributors that carry this part...");
